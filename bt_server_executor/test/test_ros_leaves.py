@@ -18,7 +18,7 @@ pytest.importorskip("bt_server_interfaces.action")
 
 from action_msgs.srv import CancelGoal  # noqa: E402
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy  # noqa: E402
-from std_msgs.msg import Float64  # noqa: E402
+from std_msgs.msg import Float64, String  # noqa: E402
 
 from bt_server_core.engine import Outcome  # noqa: E402
 from bt_server_executor.ros_validate import validate_ros  # noqa: E402
@@ -309,3 +309,59 @@ def test_call_action_cancelled_by_the_server(h):
     other.call_async(request)
     h.finish(run)
     assert run.sink.error_of(1) == "cancelled by the server"
+
+
+def test_call_action_timeout_cancel_answered_unknown_goal(h):
+    """A restarted server answers the Timeout's cancel "unknown goal": the node settles at once
+    and fails "timed out", and the Selector goes on (no unconfirmed cancel, no stopped tree)."""
+    procs = [subprocess.Popen([sys.executable, "-c", SERVER_SCRIPT, f"{h.ns}/restart"])]
+    try:
+        h.ready_action(f"{h.ns}/restart")
+        node = call_action(f"{h.ns}/restart", Timeout=3.0)
+        fallback = leaf("Set", "ok", ValueName="ok", CompareTo=None, LiteralValue=True)
+        run = h.run(bundle(node, fallback, composite="Selector"), [entry("ok", "Bool", False)])
+        h.spin_to(0.5)
+        procs[0].send_signal(signal.SIGKILL)
+        procs[0].wait(timeout=10)
+        procs.append(subprocess.Popen([sys.executable, "-c", SERVER_SCRIPT, f"{h.ns}/restart"]))
+        result = h.finish(run, 15.0)
+        assert near(run.sink.status_times(1, "C")[0], 3.0)
+        assert run.sink.status_times(1, "F")[0] - 3.0 < 1.0
+        assert run.sink.error_of(1) == "timed out"
+        assert result.outcome == Outcome.SUCCEEDED and result.unconfirmed_cancels == 0
+        assert run.blackboard.get("ok") is True
+        assert h.journal.open_goals() == []
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+
+
+def test_call_action_halted_before_a_reply_that_never_comes(h):
+    """Halted while the goal reply is outstanding, and the server never answers: the node settles
+    when the reply wait (5 s) ends, not at the cancel timeout (design 16)."""
+    ScriptedAction(h, ACTION, reply_after=None)
+    h.ready_action(f"{h.ns}/{ACTION}")
+    run = h.run(bundle(call_action(f"{h.ns}/{ACTION}"), config={"cancel_timeout_ms": 8000}))
+    h.spin_to(0.1)
+    run.runner.stop()
+    result = h.finish(run, 12.0)
+    assert result.outcome == Outcome.STOPPED and result.unconfirmed_cancels == 0
+    assert near(run.ended_at, 5.0)
+    assert len(h.journal.open_goals()) == 1  # kept: its cancel is sent again, a late acceptance cancelled
+
+
+def test_publish_keep_for_late_joiners_hands_on_the_last_message_only(h):
+    """The cached publisher outlives its runs: a late subscriber gets the last message, not the
+    ones of earlier runs (6.5)."""
+    for text in ("first", "second"):
+        node = leaf("Publish", "P", Topic=f"{h.ns}/cmd", Type="std_msgs/msg/String", Message={"data": text},
+                    Keep_For_Late_Joiners=True)
+        assert h.finish(h.run(bundle(node))).outcome == Outcome.SUCCEEDED
+    received = []
+    late = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=10, reliability=ReliabilityPolicy.RELIABLE,
+                      durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    h.peer.create_subscription(String, f"{h.ns}/cmd", lambda message: received.append(message.data), late)
+    h.spin_until(lambda: received, 3.0)
+    h.spin_for(0.5)
+    assert received == ["second"]

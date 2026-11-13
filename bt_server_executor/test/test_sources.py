@@ -7,6 +7,8 @@ case says otherwise.
 
 from __future__ import annotations
 
+import signal
+import subprocess
 import sys
 import time
 
@@ -240,3 +242,44 @@ def test_S_12_type_that_is_no_interface_package(h):
     h.spin_for(0.3)
     assert "not an interface package" in h.sources.problems[run.blackboard.id_of("t")]
     assert "os.msg" not in sys.modules
+
+
+INT32_PUBLISHER = """
+import sys, rclpy
+from std_msgs.msg import Int32
+rclpy.init()
+node = rclpy.create_node("int32_publisher")
+publisher = node.create_publisher(Int32, sys.argv[1], 10)
+node.create_timer(0.1, lambda: publisher.publish(Int32(data=7)))
+try:
+    rclpy.spin(node)
+except BaseException:
+    pass
+"""
+
+
+def test_sources_topic_changing_type_is_reported(h):
+    """7.4: the publishers are checked again when they change; a topic that now carries another
+    type gives the entry a problem and one WARNING, and its value is left alone. (The other type
+    is published by another process: one process cannot hold a topic with two types.)"""
+    first = publisher(h, Float64, f"{h.ns}/val")
+    run = h.run(hold(), [HOLD, entry("v", "Double", 0.0, source(f"{h.ns}/val", "std_msgs/msg/Float64", "data"))])
+    matched(h, first)
+    first.publish(Float64(data=1.5))
+    assert h.spin_until(lambda: run.blackboard.get("v") == 1.5, 3.0)
+    h.peer.destroy_publisher(first)
+    other = subprocess.Popen([sys.executable, "-c", INT32_PUBLISHER, f"{h.ns}/val"])
+    try:
+        entry_id = run.blackboard.id_of("v")
+        assert h.spin_until(lambda: "std_msgs/msg/Int32" in h.sources.problems.get(entry_id, ""), 8.0),             h.sources.problems
+        h.spin_for(1.0)
+        assert run.blackboard.get("v") == 1.5
+        warnings = [text for _, level, text in h.logs
+                    if level == LogLevel.WARNING and "std_msgs/msg/Int32" in text]
+        assert len(warnings) == 1, h.logs
+    finally:
+        other.send_signal(signal.SIGINT)
+        try:
+            other.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            other.kill()

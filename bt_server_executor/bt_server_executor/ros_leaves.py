@@ -324,6 +324,7 @@ class _Goal:
         self.gave_up = True
         self.run.goal_cancel_sent(self.goal_id)  # the journal keeps it open, then unsettled
         self.fail("no reply to the goal")
+        self.settle()  # halted before a reply that never came: a late acceptance gets its cancel
 
     def _on_goal_reply(self, future: Any) -> None:
         self.timers.cancel(self.reply_timer)
@@ -444,8 +445,18 @@ class _Goal:
             response = future.result()
         except Exception:  # noqa: BLE001 - the journal sends the cancel again
             return
-        if response is not None and response.return_code == CancelGoal.Response.ERROR_REJECTED:
+        code = response.return_code if response is not None else None
+        if code == CancelGoal.Response.ERROR_REJECTED:
             self.ctx.log(LogLevel.WARNING, f"{self.action_name}: the server refused to cancel the goal")
+        elif code == CancelGoal.Response.ERROR_UNKNOWN_GOAL_ID and self.state != "over":
+            # The server does not know the goal (it was restarted, or forgot a finished goal):
+            # nothing runs there for it, and no result will come.
+            self.ctx.log(LogLevel.INFO, f"{self.action_name}: the server does not know the goal: settled")
+            self.run.goal_done(self.goal_id)
+            self.state = "over"
+            self.timers.cancel_all()
+            self.settle()
+        # ERROR_GOAL_TERMINATED: the goal is over and its result is on its way (_on_result settles)
 
     # ----------------------------------------------------------------- the end
     def _on_result(self, future: Any) -> None:
@@ -633,9 +644,14 @@ class PublishLeaf(_RosLeaf):
 
     @staticmethod
     def _qos(ctx: LeafContext) -> QoSProfile:
-        keep = ctx.field("Keep For Late Joiners", False) is True
+        """Reliable, history 10; with Keep For Late Joiners transient local with a history of 1, so
+        a late subscriber gets the last message only, not older ones of earlier runs (the cached
+        publisher outlives the run)."""
+        if ctx.field("Keep For Late Joiners", False) is True:
+            return QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         return QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=10, reliability=ReliabilityPolicy.RELIABLE,
-                          durability=DurabilityPolicy.TRANSIENT_LOCAL if keep else DurabilityPolicy.VOLATILE)
+                          durability=DurabilityPolicy.VOLATILE)
 
     def prepare(self, ctx: LeafContext) -> None:
         try:
@@ -685,13 +701,21 @@ class PublishLeaf(_RosLeaf):
 # ============================================================================== Remote Sub-Tree
 class _StatusWatcher:
     """The ``~/status`` of another executor: one volatile subscription per executor for the life of
-    the node (an old message kept for late joiners must not count as a sign of life)."""
+    the node (an old message kept for late joiners must not count as a sign of life).
+
+    ``last``/``last_time``: the latest message, of any run (the executor's state now).
+    ``going[run id]``: when a message last showed that run going (its id, a state other than
+    IDLE), as an executor's watchdog counts them (8.2): an executor restarted at once publishes
+    messages, but none of them for the run it lost."""
 
     _watchers: ClassVar[weakref.WeakKeyDictionary[Any, dict[str, _StatusWatcher]]] = weakref.WeakKeyDictionary()
+    #: How many runs' signs of life are kept (the latest).
+    KEPT_RUNS = 16
 
     def __init__(self, node: Any, topic: str) -> None:
         self.last: Any = None
         self.last_time: float | None = None
+        self.going: dict[str, float] = {}
         self.subscription = node.create_subscription(TreeStatus, topic, self._on_status, WATCHDOG_QOS)
 
     @classmethod
@@ -704,8 +728,14 @@ class _StatusWatcher:
         return watcher
 
     def _on_status(self, message: Any) -> None:
-        self.last = message
-        self.last_time = time.monotonic()
+        now = time.monotonic()
+        self.last, self.last_time = message, now
+        if message.state != message.STATE_IDLE:
+            run_id = bytes(bytearray(message.run_id.uuid)).hex()
+            self.going.pop(run_id, None)
+            self.going[run_id] = now
+            while len(self.going) > self.KEPT_RUNS:
+                self.going.pop(next(iter(self.going)))
 
 
 def _bundle(run: Any) -> dict:
@@ -734,6 +764,7 @@ class _RemoteGoal(_Goal):
         self.executor = executor
         self.watcher = watcher
         self.started_at = time.monotonic()
+        self.accepted_at = self.started_at
 
     def ready_to_send(self) -> bool:
         heard = self.watcher.last_time is not None and self.watcher.last_time >= self.started_at - 1.0
@@ -755,12 +786,15 @@ class _RemoteGoal(_Goal):
         super().send()
 
     def accepted(self) -> None:
+        self.accepted_at = time.monotonic()
         self.ctx.detail("remote_run", {"executor": self.executor, "run_id": self.goal_id.hex})
         self.timers.at(self._silence_deadline(), self._check_silence)
 
     def _silence_deadline(self) -> float:
-        heard = self.watcher.last_time if self.watcher.last_time is not None else time.monotonic()
-        return heard + EXECUTOR_SILENCE_S
+        """3 s after the other executor's ``~/status`` last showed this run going (or after the
+        goal was accepted, before it first did)."""
+        heard = self.watcher.going.get(self.goal_id.hex)
+        return (heard if heard is not None else self.accepted_at) + EXECUTOR_SILENCE_S
 
     def lost(self, reason: str) -> None:
         """The other executor is gone: fail now (M-07: within 3 s of its last heartbeat). Its own

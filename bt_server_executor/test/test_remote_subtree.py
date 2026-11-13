@@ -255,3 +255,20 @@ def test_M_08_remote_tree_runs_once(peers):
     assert final(result, "b") == 5
     h.spin_for(0.5)
     assert remote.state() == TreeStatus.STATE_IDLE
+
+
+def test_M_07_remote_executor_restarted_at_once(peers):
+    """A remote executor killed and back at once publishes ~/status again, but none of it shows the
+    lost run going: the node still fails "executor lost" 3 s after the last that did."""
+    h, local, remote = peers
+    local.send(local_bundle(remote, hold_tree()), LOCAL_BOARD)
+    started = started_remote_run(h, remote)
+    h.spin_until(lambda: time.monotonic() >= started + 1.0)
+    killed = time.monotonic()
+    remote.proc.kill()
+    remote.proc.start()
+    assert h.spin_until(lambda: local.error() is not None, 10.0), local.proc.text()
+    at, reason = local.error()
+    assert reason == "executor lost"
+    assert 2.4 <= at - killed <= 3.6, at - killed
+    assert any(at > killed for at, _ in remote.statuses), "the remote executor did not come back"

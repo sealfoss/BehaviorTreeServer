@@ -222,10 +222,11 @@ class SourceManager:
             self._subscribe(topic)
 
     def _topic_type(self, topic: _Topic) -> tuple[str, str | None]:
-        """The type to subscribe with (the one the entries name, else the network's) and what is
-        wrong with it, if anything."""
+        """The type to subscribe with (the one the entries name, else the publishers') and what is
+        wrong with it, if anything. Only publishers count: the graph's types of the topic include
+        this subscription's own."""
         named = [feed.source.get("type", "") for feed in topic.feeds.values() if feed.source.get("type")]
-        network = ros_types.topic_types(self._node, topic.name)
+        network = sorted({info.topic_type for info in self._node.get_publishers_info_by_topic(topic.name)})
         if named:
             if network and named[0] not in network:
                 return named[0], f"the topic {topic.name} carries {', '.join(network)}, not {named[0]}"
@@ -233,7 +234,7 @@ class SourceManager:
         if len(network) == 1:
             return network[0], None
         if not network:
-            return "", f"the topic {topic.name} is not on the network yet: its type is unknown"
+            return "", f"the topic {topic.name} has no publisher yet: its type is unknown"
         return "", f"the topic {topic.name} has several types; name one ({', '.join(network)})"
 
     def _warn_topic(self, topic: _Topic, kind: str, text: str) -> None:
@@ -269,6 +270,7 @@ class SourceManager:
             return
         self._unsubscribe(topic)
         events = SubscriptionEventCallbacks(incompatible_qos=lambda info: self._on_incompatible(topic, info),
+                                            incompatible_type=lambda info: self._on_incompatible_type(topic),
                                             use_default_callbacks=False)
         topic.subscription = self._node.create_subscription(
             topic.cls, topic.name, lambda raw: self._on_message(topic, raw), qos, raw=True, event_callbacks=events)
@@ -286,7 +288,8 @@ class SourceManager:
         self._unsubscribe(topic)
 
     def _publishers_key(self, name: str) -> tuple:
-        return tuple(sorted((int(info.qos_profile.reliability), int(info.qos_profile.durability))
+        """What matters of the topic's publishers: their types and delivery settings."""
+        return tuple(sorted((info.topic_type, int(info.qos_profile.reliability), int(info.qos_profile.durability))
                             for info in self._node.get_publishers_info_by_topic(name)))
 
     # ----------------------------------------------------------------- checking the publishers
@@ -316,6 +319,11 @@ class SourceManager:
             topic.qos_problem = (f"ROS reports the publishers of {topic.name} as incompatible with this "
                                  f"subscription ({policy})")
             self._warn_topic(topic, "qos", topic.qos_problem)
+
+    def _on_incompatible_type(self, topic: _Topic) -> None:
+        """ROS reports a publisher of another type: look again (the entries get the problem)."""
+        if self._topics.get(topic.name) is topic:
+            self._configure(topic)
 
     # ----------------------------------------------------------------- messages
     def _on_message(self, topic: _Topic, raw: bytes) -> None:
