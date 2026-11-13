@@ -1,6 +1,6 @@
 import os
 
-from setuptools import find_packages, setup
+from setuptools import find_namespace_packages, setup
 
 package_name = "bt_server_gateway"
 
@@ -19,7 +19,9 @@ def static_files() -> list[str]:
 setup(
     name=package_name,
     version="0.1.0",
-    packages=find_packages(exclude=["test"]),
+    # Namespace discovery so that the page's folders (static/, static/assets/) count as part of
+    # the package (they hold package data only), as setuptools asks.
+    packages=find_namespace_packages(include=[package_name, package_name + ".*"]),
     package_data={package_name: static_files()},
     include_package_data=True,
     data_files=[
