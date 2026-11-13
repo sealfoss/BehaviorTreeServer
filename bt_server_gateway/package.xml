@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>bt_server_gateway</name>
+  <version>0.1.0</version>
+  <description>Behavior Tree Server gateway: the web server that holds the tree documents, serves the page over WebSockets and drives runs through an executor link (ROS or in-process).</description>
+  <maintainer email="noreply@example.com">Behavior Tree Server maintainers</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>bt_server_core</exec_depend>
+  <exec_depend>python3-aiohttp</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>bt_server_interfaces</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

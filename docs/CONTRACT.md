@@ -215,7 +215,10 @@ or `no` with that `cid`. Protocol number: **1**.
   itself when that entry does not exist); `"unknown": true` for a type the catalog lacks
   (placeholder; all its data kept; `fields` then raw JSON). Optional keys absent when unset.
 * **Entry:** `{"id", "name", "type", "value": <wire>, "reset": bool, "source": {...} | null,
-  "freshness": "ok" | "nodata" | "stale" | null, "age": seconds | null, "truncated": bool}`.
+  "freshness": "ok" | "nodata" | "stale" | null, "age": seconds | null, "truncated": bool,
+  "problem": text | null}`. `problem` says why a source cannot feed the entry (QoS
+  incompatible with the publishers, wrong type, missing field — design 7.4); the executor
+  publishes it on its entries (`"problem"` key, absent when none) and the gateway passes it on.
   A value whose wire text is longer than 64 KB is sent as its first 64 KB with
   `"truncated": true`; `ask entry_value` returns all of it. Object entries are read-only.
 * **Catalog entry:** `NodeTypeSpec.to_catalog()` of `node_types.py`; custom leaves have
