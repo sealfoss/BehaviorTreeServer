@@ -119,9 +119,11 @@ LITERAL_MAX_DEPTH = 100
 #: Containers inside containers in the files, counted the same way when writing and reading.
 MAX_NESTING = 256
 
-#: Field kinds of node types (design 6.4): the widget's five, plus ``other`` for values of any
-#: other type (shown read-only, or edited as a Python literal, such as a ROS goal dictionary).
-FIELD_KINDS = ("int", "float", "str", "bool", "choice", "other")
+#: Field kinds of node types (design 6.4): the widget's five; ``entry``, the name of a
+#: blackboard entry or ``None`` (Evaluation and Set ``CompareTo``, Print Message ``Source``),
+#: sent as it is; and ``other`` for values of any other type (shown read-only, or edited as a
+#: Python literal, such as a ROS goal dictionary).
+FIELD_KINDS = ("int", "float", "str", "bool", "choice", "entry", "other")
 
 
 class NotOrderable(ValueError):
@@ -794,7 +796,7 @@ def field_to_wire(kind: str, value: Any) -> Any:
         if isinstance(value, int) and not isinstance(value, bool) and abs(value) > JS_SAFE_INT:
             return str(value)
         return value
-    if kind in ("str", "bool", "choice"):
+    if kind in ("str", "bool", "choice", "entry"):
         return value
     if value is None:
         return None
@@ -833,6 +835,12 @@ def field_from_wire(kind: str, wire: Any) -> Any:
     if kind == "bool":
         if not isinstance(wire, bool):
             raise ValueError("a check box field needs true or false")
+        return wire
+    if kind == "entry":
+        if wire is None or wire == "":
+            return None
+        if not isinstance(wire, str):
+            raise ValueError("an entry field needs the name of an entry, or null")
         return wire
     if kind == "choice":
         if not (isinstance(wire, list) and wire and all(isinstance(item, str) for item in wire)):

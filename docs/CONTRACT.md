@@ -392,7 +392,18 @@ class ExecutorLink(Protocol):
                                            #  "details_seq", "details": [...], "log_seq"}
     async def get_log(self, run_id: str | None, from_seq: int, max_records: int) -> list[LinkRecord]: ...
     def subscribe(self, listener: RunListener) -> None: ...
+
+class LinkFactory(Protocol):     # one per gateway; makes the links and finds executors (3.4)
+    async def start(self, on_executors: Callable[[list[str]], None]) -> None: ...
+        # on_executors(names) whenever the set of executors found on the network changes
+    def link(self, name: str) -> ExecutorLink: ...   # the same object for the same name
+    async def close(self) -> None: ...
 ```
+
+`local_link.LocalLinkFactory(settings)` offers one executor, `"local"`. `ros_link.RosLinkFactory(settings)`
+spins one rclpy node (`bt_gateway`) on a second thread, discovers `ExecuteTree` action servers
+(`get_action_names_and_types`; the executor name is the action name without `/execute`) and
+hands every ROS callback to asyncio with `loop.call_soon_threadsafe`.
 
 Ops sent through `apply` carry values already decoded to Python values except that, over
 ROS, `ops_json` uses the file encoding (`encode_value` + `dumps_json`); `RosLink` and the

@@ -121,7 +121,7 @@ _F = FieldSpec
 #: Operators are kept as text in the field ``Operator`` (not as a widget choice list).
 EVALUATION_FIELDS = (
     _F("ValueName", "str", "", "The entry to look at."),
-    _F("CompareTo", "other", None, "null: compare with the literal; otherwise the name of another entry."),
+    _F("CompareTo", "entry", None, "null: compare with the literal; otherwise the name of another entry."),
     _F("LiteralValue", "other", None, "The literal; its type follows the ValueName entry."),
     _F("Operator", "str", "==", "One of == != < <= > >=.", new=True),
     _F("Wait", "bool", False, "Keep running until the comparison holds.", new=True),
@@ -130,7 +130,7 @@ EVALUATION_FIELDS = (
 
 SET_FIELDS = (
     _F("ValueName", "str", "", "The entry to set."),
-    _F("CompareTo", "other", None, "null: set to the literal; otherwise the name of the entry to copy."),
+    _F("CompareTo", "entry", None, "null: set to the literal; otherwise the name of the entry to copy."),
     _F("LiteralValue", "other", None, "The literal; its type follows the ValueName entry."),
 )
 
@@ -161,7 +161,7 @@ BUILTIN_TYPES: tuple[NodeTypeSpec, ...] = (
                  doc="Sends one UDP datagram from the executor's host."),
     NodeTypeSpec("Print Message", "Print Message", "leaf", "Messages",
                  (_F("Level", "int", 3, "1 ERROR, 2 WARNING, 3 DEBUG, 4 INFO."),
-                  _F("Source", "other", None, "null, or the name of an entry to print as <entry> = <value>."),
+                  _F("Source", "entry", None, "null, or the name of an entry to print as <entry> = <value>."),
                   _F("Message", "str", "")),
                  "instant", "print",
                  doc="Writes the message, or <entry> = <value>, to the tree's log."),

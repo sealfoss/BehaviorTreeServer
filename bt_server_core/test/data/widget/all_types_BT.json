@@ -1,0 +1,261 @@
+{
+  "format": "behavior_tree_widget",
+  "version": 1,
+  "config": {
+    "tick_interval_ms": 250,
+    "repeat": true,
+    "restore_blackboard": false,
+    "default_memory": true,
+    "log_level": 2
+  },
+  "view": {
+    "zoom": 1.0,
+    "center": [
+      105.0,
+      60.0
+    ]
+  },
+  "nodes": [
+    {
+      "id": "096c918687704f989240123c425e5d86",
+      "type": "Root",
+      "title": "Root",
+      "x": 0.0,
+      "y": 0.0,
+      "composite": "Selector",
+      "memory": true
+    },
+    {
+      "id": "21ebee1aef6647eea9cccbaab1f2a29b",
+      "type": "Sequence",
+      "title": "Sequence",
+      "x": -600.0,
+      "y": 200.0,
+      "memory": true
+    },
+    {
+      "id": "cd3557008b744af5b0ab3feca1d2ccca",
+      "type": "Selector",
+      "title": "Fallback",
+      "x": 0.0,
+      "y": 200.0,
+      "memory": false
+    },
+    {
+      "id": "0196aab430db441d91c5e3e600dc238f",
+      "type": "Negation",
+      "title": "Negation",
+      "x": 600.0,
+      "y": 200.0
+    },
+    {
+      "id": "caf0e72893054545891804c64e7020af",
+      "type": "Evaluation",
+      "title": "Evaluation",
+      "x": -900.0,
+      "y": 400.0,
+      "fields": {
+        "ValueName": "counter",
+        "CompareTo": null,
+        "LiteralValue": 4
+      }
+    },
+    {
+      "id": "a35d54f44759410a9bd8e53e954caa8b",
+      "type": "Evaluation",
+      "title": "Evaluation",
+      "x": -400.0,
+      "y": 400.0,
+      "fields": {
+        "ValueName": "ratio",
+        "CompareTo": null,
+        "LiteralValue": NaN
+      }
+    },
+    {
+      "id": "526a1df23cc941db88ba3a4ed9b73048",
+      "type": "Set",
+      "title": "Set",
+      "x": 100.0,
+      "y": 400.0,
+      "fields": {
+        "ValueName": "items",
+        "CompareTo": null,
+        "LiteralValue": {
+          "__set__": [
+            1,
+            2,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "id": "449127ebb23d491a9fa9d9b2e759a9ad",
+      "type": "Set",
+      "title": "Set",
+      "x": 600.0,
+      "y": 400.0,
+      "fields": {
+        "ValueName": "speed",
+        "CompareTo": "ratio",
+        "LiteralValue": null
+      }
+    },
+    {
+      "id": "bfe5e8e3349f422e8e254158337a8379",
+      "type": "Print Message",
+      "title": "Print Message",
+      "x": -200.0,
+      "y": 600.0,
+      "fields": {
+        "Level": 2,
+        "Source": "counter",
+        "Message": "hello é ✓"
+      }
+    },
+    {
+      "id": "87247708944442be803baf21d33cc079",
+      "type": "UDP Message",
+      "title": "UDP Message",
+      "x": -1400.0,
+      "y": 400.0,
+      "fields": {
+        "Destination IP": "127.0.0.1",
+        "Destination Port": 5005,
+        "Message": "ping"
+      }
+    },
+    {
+      "id": "3a1b2c25c49a4f609381b20a4f2a07ab",
+      "type": "Mover",
+      "title": "Mover",
+      "x": -1900.0,
+      "y": 400.0,
+      "fields": {
+        "x": 2.0,
+        "speed": 5,
+        "mode": [
+          "walk",
+          "run",
+          "crawl"
+        ],
+        "avoid": true,
+        "label": "target",
+        "extra": {
+          "a": {
+            "__tuple__": [
+              1,
+              2
+            ]
+          },
+          "b": {
+            "__set__": [
+              3,
+              4
+            ]
+          }
+        }
+      },
+      "field_selections": {
+        "mode": 2
+      }
+    },
+    {
+      "id": "3d9b74fed8e14ab99cc682ee3e279c1a",
+      "type": "Sub-Tree",
+      "title": "patrol",
+      "x": 1200.0,
+      "y": 400.0,
+      "fields": {
+        "File": "sub/patrol_BT.json"
+      }
+    },
+    {
+      "id": "2d6c788089c74fd0b3290f3f12d44710",
+      "type": "Restart",
+      "title": "Restart",
+      "x": 1700.0,
+      "y": 600.0,
+      "fields": {}
+    },
+    {
+      "id": "cd4908832c564ad2afe468247fd92aa3",
+      "type": "Pause",
+      "title": "Pause",
+      "x": 2000.0,
+      "y": 600.0,
+      "fields": {}
+    },
+    {
+      "id": "301ef0b5a1e1472d9ad675ac418fe16a",
+      "type": "Stop",
+      "title": "Stop",
+      "x": 2300.0,
+      "y": 600.0,
+      "fields": {}
+    },
+    {
+      "id": "fc1afeaaf0434c9aba441bcc6b2e4635",
+      "type": "Notes",
+      "title": "Notes",
+      "x": 2600.0,
+      "y": 0.0,
+      "text": "Patrol loop:\nchecks é ✓",
+      "width": 300,
+      "height": 150
+    },
+    {
+      "id": "a040b62b4b844391b389c02c3f07b94e",
+      "type": "Group",
+      "title": "group_001",
+      "x": -2000.0,
+      "y": 350.0,
+      "width": 900,
+      "height": 400,
+      "color": "#2e9d4f"
+    }
+  ],
+  "connections": [
+    {
+      "parent": "096c918687704f989240123c425e5d86",
+      "child": "21ebee1aef6647eea9cccbaab1f2a29b"
+    },
+    {
+      "parent": "096c918687704f989240123c425e5d86",
+      "child": "cd3557008b744af5b0ab3feca1d2ccca"
+    },
+    {
+      "parent": "096c918687704f989240123c425e5d86",
+      "child": "0196aab430db441d91c5e3e600dc238f"
+    },
+    {
+      "parent": "096c918687704f989240123c425e5d86",
+      "child": "3d9b74fed8e14ab99cc682ee3e279c1a"
+    },
+    {
+      "parent": "21ebee1aef6647eea9cccbaab1f2a29b",
+      "child": "87247708944442be803baf21d33cc079"
+    },
+    {
+      "parent": "21ebee1aef6647eea9cccbaab1f2a29b",
+      "child": "caf0e72893054545891804c64e7020af"
+    },
+    {
+      "parent": "21ebee1aef6647eea9cccbaab1f2a29b",
+      "child": "a35d54f44759410a9bd8e53e954caa8b"
+    },
+    {
+      "parent": "cd3557008b744af5b0ab3feca1d2ccca",
+      "child": "bfe5e8e3349f422e8e254158337a8379"
+    },
+    {
+      "parent": "cd3557008b744af5b0ab3feca1d2ccca",
+      "child": "526a1df23cc941db88ba3a4ed9b73048"
+    },
+    {
+      "parent": "0196aab430db441d91c5e3e600dc238f",
+      "child": "449127ebb23d491a9fa9d9b2e759a9ad"
+    }
+  ]
+}

@@ -1,0 +1,79 @@
+{
+  "format": "behavior_tree_widget_blackboard",
+  "version": 1,
+  "blackboard": [
+    {
+      "name": "counter",
+      "type": "Integer",
+      "value": 4,
+      "reset": true
+    },
+    {
+      "name": "ratio",
+      "type": "Double",
+      "value": NaN
+    },
+    {
+      "name": "items",
+      "type": "Set",
+      "value": {
+        "__set__": [
+          1,
+          2,
+          3
+        ]
+      }
+    },
+    {
+      "name": "pair",
+      "type": "List",
+      "value": [
+        {
+          "__tuple__": [
+            1,
+            2
+          ]
+        },
+        {
+          "k": 1
+        }
+      ]
+    },
+    {
+      "name": "table",
+      "type": "Dictionary",
+      "value": {
+        "__dict__": [
+          [
+            1,
+            "one"
+          ],
+          [
+            {
+              "__tuple__": [
+                2,
+                3
+              ]
+            },
+            "pair"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "speed",
+      "type": "Double",
+      "value": 1.0
+    },
+    {
+      "name": "name",
+      "type": "String",
+      "value": "robot é"
+    },
+    {
+      "name": "flag",
+      "type": "Bool",
+      "value": false
+    }
+  ]
+}
