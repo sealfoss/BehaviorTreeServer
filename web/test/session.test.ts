@@ -134,4 +134,50 @@ describe('Session', () => {
     expect(session.executors.attachedCount).toBe(3);
     expect(session.ui.notices.at(-1)).toMatchObject({ level: 'warning' });
   });
+
+  it('closes the recovery offer when another tab answered it, and keeps the document (contract 5.6)', async () => {
+    const { session, socket } = attached();
+    session.ui.recovery = ['robot'];
+    const offer = session.ui.ask({ title: 'Recover', text: '', buttons: [{ label: 'Restore', value: 'yes' }], testid: 'dialog-recovery' }, 'robot');
+    socket.deliver({ t: 'doc', doc: 'robot', event: 'recovery_declined', document: null });
+    await expect(offer).resolves.toBeNull();
+    expect(session.ui.recovery).toEqual([]);
+    expect(session.docs.get('robot')).toBeDefined(); // not closed
+    const recovered = { ...doc(), rev: 9, unsaved: true };
+    socket.deliver({ t: 'doc', doc: 'robot', event: 'recovered', document: recovered });
+    expect(session.docs.get('robot')!.rev).toBe(9);
+  });
+
+  it('forgets the last run outcome when New or Load shows another tree, and says the outcome once', () => {
+    const { session, socket } = attached();
+    socket.deliver({ t: 'run', exec: '/e', event: 'started', run_id: 'r', label: 'robot', requested_by: '', node_paths: ['root'], own: true, bundle: null });
+    socket.deliver({ t: 'st', exec: '/e', run_id: 'r', state: 0, loop: 0, cancelling: 0, unsettled: 0, outcome: 1, message: 'succeeded', v: '2' });
+    socket.deliver({ t: 'run', exec: '/e', event: 'ended', run_id: 'r', label: 'robot', requested_by: '', node_paths: ['root'], own: true, bundle: null, outcome: 1, message: 'Succeeded' });
+    expect(session.ui.notices.at(-1)?.text).toBe('Execution finished: Succeeded');
+    expect(session.lastOutcome).toBe(1);
+    socket.deliver({
+      t: 'snapshot', exec: '/e', client: 'me', root: 'other', docs: { other: { ...doc(), key: 'other' } }, blackboard: [], catalog: [], online: true,
+      starting: false, run: { exec: '/e', event: 'started', run_id: 'r', label: 'robot', requested_by: '', node_paths: ['root'], own: true, bundle: null },
+      st: { run_id: 'r', state: 0, loop: 0, cancelling: 0, unsettled: 0, outcome: 1, message: 'succeeded', v: '2' },
+      details: {}, log: { first: 0, lines: [] }, recovery: [], attached: 1, findings: [],
+    });
+    expect(session.lastOutcome).toBe(0); // the run was robot's, the tree is other now
+  });
+
+  it('creates a missing sub-tree file when asked to (choose_file, contract 5.4)', async () => {
+    const { session, socket } = attached();
+    const done = session.file('zoom_in', { doc: 'robot', node: 'a', path: 'a' });
+    socket.deliver({ t: 'no', cid: 1, reason: 'missing', question: { kind: 'choose_file', node: 'a', file: 'patrol_BT.json' } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(socket.last()).toMatchObject({ t: 'file', action: 'list' });
+    socket.deliver({ t: 'ok', cid: socket.last().cid as number, trees: [{ key: 'robot' }], dirs: [] });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(session.ui.question?.input?.value).toBe('patrol'); // a tree name, as the file list has them
+    session.ui.answer({ button: 'use', input: 'patrol' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(socket.last()).toMatchObject({ t: 'file', action: 'zoom_in', file: 'patrol', create: true });
+    socket.deliver({ t: 'ok', cid: socket.last().cid as number, doc: 'patrol', document: { ...doc(), key: 'patrol' } });
+    await expect(done).resolves.toMatchObject({ t: 'ok', doc: 'patrol' });
+  });
 });

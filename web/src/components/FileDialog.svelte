@@ -108,17 +108,46 @@
     }
   }
 
+  /** POST /upload; a 409 with a `replace` question asks "Replace?" and sends again with `replace`. */
   async function upload(): Promise<void> {
-    const files = fileInput?.files;
-    if (!files?.length) return;
-    const form = new FormData();
-    for (const file of files) form.append('file', file, file.name);
-    form.append('dir', uploadDir);
+    const files = fileInput?.files ? [...fileInput.files] : [];
+    if (!files.length) return;
     busy = true;
     try {
-      const response = await fetch('/upload', { method: 'POST', body: form });
-      if (!response.ok) session.ui.notify('warning', `Upload refused: ${(await response.text()) || response.status}`);
-      else session.ui.notify('info', 'Uploaded.', 2500);
+      let replace = false;
+      for (;;) {
+        const form = new FormData();
+        for (const file of files) form.append('file', file, file.name);
+        form.append('dir', uploadDir);
+        if (replace) form.append('replace', 'true');
+        const response = await fetch('/upload', { method: 'POST', body: form });
+        let answer: { ok?: boolean; key?: string; reason?: string; question?: { kind?: string; name?: string } } = {};
+        try {
+          answer = await response.json();
+        } catch {
+          answer = { reason: `the server answered ${response.status}` };
+        }
+        if (response.ok) {
+          session.ui.notify('info', `Uploaded ${answer.key ?? ''}.`, 2500);
+          return;
+        }
+        if (response.status === 409 && answer.question?.kind === 'replace' && !replace) {
+          const choice = await session.ui.ask({
+            title: 'Replace file',
+            text: `The tree ${answer.question.name ?? ''} exists. Replace it with the upload?`,
+            buttons: [
+              { label: 'Replace', value: 'yes', primary: true },
+              { label: 'Cancel', value: 'cancel' },
+            ],
+            testid: 'dialog-replace',
+          });
+          if (choice?.button !== 'yes') return;
+          replace = true;
+          continue;
+        }
+        session.ui.notify('warning', `Upload refused: ${answer.reason ?? response.status}`);
+        return;
+      }
     } catch (error) {
       session.ui.notify('error', `Upload failed: ${(error as Error).message}`);
     } finally {

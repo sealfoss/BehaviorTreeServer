@@ -6,7 +6,8 @@
   import { session } from '../lib/stores/session.svelte';
   import type { CatalogEntry, CatalogField, WireNode } from '../lib/types';
   import { LOG_LEVELS } from '../lib/types';
-  import { convertLiteral, defaultWire, parsePyLiteral, pyLookup, pyDisplay, type Wire } from '../lib/wire';
+  import { relativeFile, resolveSubtree, treeKeyOf } from '../lib/paths';
+  import { defaultWire, parsePyLiteral, pyLookup, pyDisplay, type Wire } from '../lib/wire';
   import DoubleInput from './DoubleInput.svelte';
   import EntrySelect from './EntrySelect.svelte';
   import FieldEditor from './FieldEditor.svelte';
@@ -33,17 +34,40 @@
   const compareTo = $derived(entryName(fields.CompareTo));
   const printSource = $derived(entryName(fields.Source));
   const literal = $derived((fields.LiteralValue ?? null) as { type?: string; value?: Wire } | null);
-  const literalType = $derived(valueEntry?.type ?? literal?.type ?? 'String');
+  // The editor follows the typed value as the document holds it; the gateway converts the
+  // literal when Value Name changes type, and sends the result like any other edit.
+  const literalType = $derived(literal?.type ?? valueEntry?.type ?? 'String');
 
   function chooseValueName(name: string | null): void {
     const chosen = name ?? '';
+    const compared = compareTo !== null ? session.blackboard.byName(compareTo) : undefined;
     setField('ValueName', chosen);
+    // Another type: Compare To goes back to Literal (the widget's rule).
     const entry = session.blackboard.byName(chosen);
-    if (!entry || entry.type === literalType) return;
-    // Another type: Compare To goes back to Literal, and the literal is converted (the widget's rule).
-    if (compareTo !== null) setField('CompareTo', null);
-    const from = literal?.type ?? literalType;
-    setField('LiteralValue', { type: entry.type, value: literal?.value === undefined || literal?.value === null ? defaultWire(entry.type) : convertLiteral(literal.value, from, entry.type) });
+    if (entry && compared && compared.type !== entry.type) setField('CompareTo', null);
+  }
+
+  // Sub-Tree files ----------------------------------------------------------------------------
+  const file = $derived(typeof fields.File === 'string' ? fields.File : '');
+  const resolved = $derived(resolveSubtree(docKey, file));
+
+  /** "..." of the widget's Sub-Tree node: choose a tree of the server; stored relative to this tree's folder. */
+  async function browse(): Promise<void> {
+    const list = await session.file('list');
+    const trees = list ? ((list.trees ?? []) as { key: string }[]).map((tree) => tree.key) : [];
+    const answer = await session.ui.ask({
+      title: 'Choose the tree to run',
+      text: 'The trees on the server:',
+      buttons: [
+        { label: 'Choose', value: 'ok', primary: true },
+        { label: 'Cancel', value: 'cancel' },
+      ],
+      input: { label: 'Tree', value: resolved ?? '' },
+      choices: trees,
+      testid: 'dialog-choose-subtree',
+    });
+    const chosen = answer?.button === 'ok' ? treeKeyOf(answer.input) : '';
+    if (chosen) setField('File', relativeFile(docKey, chosen));
   }
 
   // Generic fields ----------------------------------------------------------------------------
@@ -140,6 +164,21 @@
       {@render label('Message')}
       <input type="text" value={String(fields.Message ?? '')} disabled={readOnly} onchange={(e) => setField('Message', (e.currentTarget as HTMLInputElement).value)} data-testid="field-{node.id}-Message" />
     {/if}
+  {:else if special === 'subtree'}
+    {@render label('File', 'The tree file to run, relative to the folder of this tree')}
+    <span class="file-field">
+      <input
+        type="text"
+        value={file}
+        placeholder="tree_BT.json"
+        title={resolved ? `${resolved}_BT.json in the trees folder` : 'No file chosen'}
+        disabled={readOnly}
+        onchange={(e) => setField('File', (e.currentTarget as HTMLInputElement).value)}
+        onkeydown={(e) => e.key === 'Enter' && (e.currentTarget as HTMLInputElement).blur()}
+        data-testid="field-{node.id}-File"
+      />
+      <button type="button" class="browse" title="Choose the behavior tree file to run" disabled={readOnly} onclick={browse} data-testid="browse-{node.id}">…</button>
+    </span>
   {:else if special === 'remote_subtree'}
     {@render label('Executor', 'The other executor')}
     <select value={String(fields.Executor ?? '')} disabled={readOnly} onchange={(e) => setField('Executor', (e.currentTarget as HTMLSelectElement).value)} data-testid="field-{node.id}-Executor">

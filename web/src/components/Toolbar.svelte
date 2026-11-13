@@ -25,7 +25,7 @@
     const name = STATES[state] ?? String(state);
     if (state === 3) return `${name} (${run.cancelling} cancel${run.cancelling === 1 ? '' : 's'} outstanding)`;
     if (state === 1 || state === 2) return `${name} · loop ${run.loop + 1}`;
-    if (state === 0 && run.outcome) return `${name} (${OUTCOMES[run.outcome] ?? ''})`;
+    if (state === 0 && session.lastOutcome) return `${name} (${OUTCOMES[session.lastOutcome] ?? ''})`;
     return name;
   });
 
@@ -74,7 +74,7 @@
     <button type="button" onclick={save} disabled={level?.kind !== 'doc' || !executors.online} title="Save the tree shown (the sub-tree zoomed into, to its own file)" data-testid="btn-save">Save</button>
     <button type="button" onclick={() => onFiles('save_as')} disabled={level?.kind !== 'doc' || !executors.online} title="Save the tree shown under another name" data-testid="btn-save-as">Save As…</button>
     <button type="button" onclick={() => onFiles('browse')} disabled={!executors.online} title="Files: rename, delete, upload, download" data-testid="btn-files">Files…</button>
-    <button type="button" onclick={revert} disabled={level?.kind !== 'doc' || !shown?.unsaved} title="Discard the unsaved changes of the tree shown, for everyone" data-testid="btn-revert">Revert</button>
+    <button type="button" onclick={revert} disabled={level?.kind !== 'doc' || !shown?.unsaved || !executors.online} title="Discard the unsaved changes of the tree shown, for everyone" data-testid="btn-revert">Revert</button>
     <button type="button" onclick={() => session.goBack()} disabled={session.view.stack.length <= 1} title="Show the tree containing this sub-tree" data-testid="btn-go-back">Go Back</button>
   </div>
   <div class="tool-group run-controls">
@@ -82,9 +82,9 @@
     <button type="button" class="icon" onclick={() => void session.command('pause')} disabled={!canRun || (state !== 1 && state !== 4)} title="Pause execution" data-testid="btn-pause">⏸</button>
     <button type="button" class="icon" onclick={() => void session.command('stop')} disabled={!executors.online || (state !== 1 && state !== 2 && state !== 4)} title="Stop execution and reset the tree" data-testid="btn-stop">⏹</button>
     <button type="button" class="icon" onclick={() => void session.command('reset')} disabled={!canRun || foreign || state === 3 || state === 4} title="Reset the tree without stopping execution" data-testid="btn-reset">🔄</button>
-    <button type="button" class="icon" onclick={() => (session.ui.dialog = 'configure')} disabled={!rootDoc} title="Configure tree options" data-testid="btn-configure">⚙</button>
+    <button type="button" class="icon" onclick={() => (session.ui.dialog = 'configure')} disabled={!rootDoc || !executors.online} title="Configure tree options" data-testid="btn-configure">⚙</button>
     <label class="check" title="Execute the tree again each time the root node returns (blackboard and node values are kept)">
-      <input type="checkbox" checked={rootDoc?.config.repeat === true} disabled={!rootDoc} onchange={setLoop} data-testid="chk-loop" />
+      <input type="checkbox" checked={rootDoc?.config.repeat === true} disabled={!rootDoc || !executors.online} onchange={setLoop} data-testid="chk-loop" />
       Loop Execution
     </label>
   </div>
@@ -101,6 +101,7 @@
     <span class="breadcrumb" title="The trees shown" data-testid="breadcrumb">{breadcrumb}{shown?.unsaved ? ' *' : ''}</span>
     <select
       value={exec ?? ''}
+      disabled={!executors.online}
       onchange={(e) => session.attach((e.currentTarget as HTMLSelectElement).value)}
       title="The executor this page is attached to"
       data-testid="executor-picker"
@@ -110,7 +111,7 @@
         <option value={item.name}>{item.name}{item.online ? '' : ' (offline)'}</option>
       {/each}
     </select>
-    <span class="attached" title="Browsers attached to this session" data-testid="attached-count">👥 {executors.attachedCount}</span>
+    <span class="attached" title="Browsers attached to this session" data-testid="attached-count">👥 {executors.online ? executors.attachedCount : '?'}</span>
     <span class="connection" class:online={executors.online} title={executors.online ? 'Connected' : 'Offline: reconnecting'} data-testid="connection-state">{executors.online ? '●' : 'offline'}</span>
   </div>
 </header>

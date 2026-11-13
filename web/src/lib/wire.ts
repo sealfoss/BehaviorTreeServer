@@ -363,26 +363,3 @@ export function defaultWire(type: string): Wire {
       return null;
   }
 }
-
-/**
- * A literal of an Evaluation or Set node for an entry of another type, as the widget converts
- * it (values.convert_literal): numbers, booleans and number text between Integer, Double and
- * Bool, anything to text for String, the type's default when it cannot be converted.
- */
-export function convertLiteral(value: Wire, from: string, to: string): Wire {
-  if (from === to) return value;
-  const number = typeof value === 'number' ? value : typeof value === 'boolean' ? Number(value) : from === 'Double' || from === 'String' ? doubleFromWire(value) : NaN;
-  switch (to) {
-    case 'Integer':
-      return Number.isFinite(number) ? Math.min(Math.max(Math.round(number), -(2 ** 31)), 2 ** 31 - 1) : 0;
-    case 'Double':
-      return Number.isNaN(number) && from !== 'Double' ? '0.0' : doubleToWire(number);
-    case 'String':
-      return value === null ? '' : typeof value === 'boolean' ? (value ? 'True' : 'False') : String(value);
-    case 'Bool':
-      if (typeof value === 'string' && from === 'String') return ['true', '1', 'yes', 'on'].includes(value.trim().toLowerCase());
-      return Number.isFinite(number) ? number !== 0 : false;
-    default:
-      return defaultWire(to);
-  }
-}

@@ -1,6 +1,7 @@
 <script lang="ts">
   // Source… of a blackboard entry (design 7.4): a ROS topic whose messages set its value.
   // Test takes one message now and shows the value the entry would get (ask sample).
+  import { entryTypeOf, interfaceRows, interfaceSections, type IfaceRow } from '../lib/iface';
   import { session } from '../lib/stores/session.svelte';
 
   let { onclose }: { onclose: () => void } = $props();
@@ -21,6 +22,19 @@
         const graph = (reply.graph ?? {}) as { topics?: [string, string | string[]][] };
         topics = (graph.topics ?? []).map(([name, types]) => [name, Array.isArray(types) ? (types[0] ?? '') : types]);
       }
+    });
+  });
+
+  // The fields of the message type, offered for Field (design 7.4); typing stays possible.
+  let fieldRows = $state<IfaceRow[]>([]);
+  let fieldsOf = '';
+  $effect(() => {
+    const wanted = type.trim();
+    if (wanted === fieldsOf || !/^[^/\s]+\/msg\/[^/\s]+$/.test(wanted)) return;
+    fieldsOf = wanted;
+    void session.ask('interface', { type: wanted }).then((reply) => {
+      if (fieldsOf !== wanted) return;
+      fieldRows = reply?.t === 'ok' ? interfaceRows(interfaceSections(reply.interface, 'Message').Message) : [];
     });
   });
 
@@ -67,7 +81,10 @@
       <label for="src-type">Type:</label>
       <input id="src-type" bind:value={type} placeholder="sensor_msgs/msg/BatteryState" data-testid="src-type" />
       <label for="src-field">Field:</label>
-      <input id="src-field" bind:value={field} placeholder="percentage (empty: the whole message)" data-testid="src-field" />
+      <input id="src-field" list="src-fields" bind:value={field} placeholder="percentage (empty: the whole message)" data-testid="src-field" />
+      <datalist id="src-fields" data-testid="src-fields">
+        {#each fieldRows as row (row.path)}<option value={row.path}>{entryTypeOf(row.kind)}</option>{/each}
+      </datalist>
       <label for="src-rate">Max rate:</label>
       <span><input id="src-rate" type="number" min="0" step="0.1" bind:value={rate} data-testid="src-rate" /> per second</span>
       <label for="src-age">Max age:</label>

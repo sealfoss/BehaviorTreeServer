@@ -17,7 +17,8 @@
 
   const fed = $derived(!!entry.source);
   const stale = $derived(entry.freshness === 'nodata' || entry.freshness === 'stale');
-  const readOnly = $derived(fed || entry.type === 'Object');
+  const online = $derived(session.executors.online);
+  const readOnly = $derived(fed || entry.type === 'Object' || !online);
   const items = $derived(['List', 'Dictionary', 'Set'].includes(entry.type) && typeof entry.value === 'string' && !entry.truncated ? containerItems(entry.value) : []);
   const ageText = $derived.by(() => {
     if (entry.freshness === 'nodata') return 'no data';
@@ -51,14 +52,15 @@
     class="bb-col-name"
     type="text"
     value={entry.name}
+    disabled={!online}
     onchange={rename}
     onkeydown={(e) => e.key === 'Enter' && (e.currentTarget as HTMLInputElement).blur()}
     data-testid="bb-name-{entry.name}"
   />
   <span class="bb-col-value">
     {#if entry.truncated}
-      <button type="button" class="link" onclick={() => openDialog('entry')} title="The value is long; show all of it" data-testid="bb-value-{entry.name}">
-        {String(entry.value).slice(0, 60)}… (show all)
+      <button type="button" class="link show-all" onclick={() => openDialog('entry')} title="The value is long; show all of it" data-testid="bb-value-{entry.name}">
+        <span class="show-all-text">{String(entry.value).slice(0, 60)}</span><span class="show-all-more">… (show all)</span>
       </button>
     {:else}
       <ValueEditor
@@ -79,19 +81,19 @@
     class="bb-col-reset"
     type="checkbox"
     checked={entry.reset}
-    disabled={fed}
+    disabled={fed || !online}
     onchange={(e) => void session.bbOp({ op: 'bb.set_reset', id: entry.id, reset: (e.currentTarget as HTMLInputElement).checked })}
     title="Resets: at the end of every execution loop, this entry goes back to the value it had when the loop started"
     data-testid="bb-reset-{entry.name}"
   />
   <span class="bb-col-source">
-    <button type="button" onclick={() => openDialog('source')} disabled={entry.type === 'Object'} data-testid="bb-source-{entry.name}">Source…</button>
+    <button type="button" onclick={() => openDialog('source')} disabled={entry.type === 'Object' || !online} data-testid="bb-source-{entry.name}">Source…</button>
     {#if entry.problem}<span class="bb-problem" title={entry.problem} data-testid="bb-problem-{entry.name}">⚠ {entry.problem}</span>{/if}
     {#if fed}<span class="bb-topic" title="{entry.source?.type} {entry.source?.field ?? ''}">{entry.source?.topic}</span>{/if}
     {#if fed && ageText}<span class="bb-age" data-testid="bb-age-{entry.name}">{ageText}</span>{/if}
   </span>
   <span class="bb-col-order">
-    <button type="button" class="arrow" disabled={first} onclick={() => onmove(-1)} title="Move this entry up in the list" data-testid="bb-up-{entry.name}">▲</button>
-    <button type="button" class="arrow" disabled={last} onclick={() => onmove(1)} title="Move this entry down in the list" data-testid="bb-down-{entry.name}">▼</button>
+    <button type="button" class="arrow" disabled={first || !online} onclick={() => onmove(-1)} title="Move this entry up in the list" data-testid="bb-up-{entry.name}">▲</button>
+    <button type="button" class="arrow" disabled={last || !online} onclick={() => onmove(1)} title="Move this entry down in the list" data-testid="bb-down-{entry.name}">▼</button>
   </span>
 </div>

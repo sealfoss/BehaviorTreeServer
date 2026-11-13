@@ -70,6 +70,7 @@ button:hover:not(:disabled) {
 
 button:disabled,
 a.button.disabled {
+  filter: grayscale(1);
   opacity: 0.45;
   cursor: default;
   pointer-events: none;
@@ -508,9 +509,10 @@ label.check {
   text-overflow: ellipsis;
 }
 
-/* Below about 40% zoom: title and status only (design 11.3). */
-.world.lod-low .fields-frame {
-  visibility: hidden;
+/* Below about 40% zoom: title and status only (design 11.3); NodeView keeps the full width. */
+.world.lod-low .fields-frame,
+.world.lod-low .label-frame {
+  display: none;
 }
 
 /* Notes */
@@ -956,7 +958,7 @@ label.check {
 
 .notices {
   position: fixed;
-  right: 12px;
+  left: 12px;
   bottom: 12px;
   z-index: 90;
   display: flex;
@@ -1001,7 +1003,7 @@ label.check {
 .bb-header,
 .bb-row {
   display: grid;
-  grid-template-columns: 18px 56px minmax(60px, 1fr) minmax(90px, 1.4fr) 42px 64px 44px;
+  grid-template-columns: 18px 74px minmax(60px, 1fr) minmax(130px, 1.6fr) 42px 64px 44px;
   gap: 4px;
   align-items: center;
   padding: 2px 6px;
@@ -1013,12 +1015,14 @@ label.check {
   background: var(--panel);
 }
 
-.bb-header label.check {
-  grid-column: 1 / 3;
+.bb-select-all {
+  padding: 3px 6px 0;
+  background: var(--panel);
 }
 
-.bb-header .bb-col-type {
-  display: none;
+.bb-col-type {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .bb-row {
@@ -1033,16 +1037,35 @@ label.check {
   display: flex;
   gap: 3px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .bb-col-value > input,
 .bb-col-value > select {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
-.bb-items {
-  max-width: 70px;
+.bb-col-value > select.bb-items {
+  flex: 0 0 58px;
+}
+
+/* A shortened value: its text is cut to the column; the button never reaches the next columns. */
+.show-all {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+.show-all-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.show-all-more {
+  flex: none;
 }
 
 .bb-col-source button {

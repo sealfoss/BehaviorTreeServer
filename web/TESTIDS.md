@@ -16,7 +16,8 @@ digits), `<name>` a blackboard entry name, `<key>` a document key such as `robot
 | `parent-<id>` / `children-<id>` | The Parent and Children (Negation: Child) labels; `data-state` is `disconnected`, `placing` or `connected`. |
 | `fields-<id>` | The field editors of a leaf. |
 | `field-<id>-<field>` | One field editor, by field name (`Message`, `x`, `ValueName`, `Operator`, `CompareTo`, `LiteralValue`, `Wait`, `WaitTimeout`, `Level`, `Source`, `File`, `Executor`, ...). Doubles are text boxes. |
-| `rename-<id>` | The title editor shown by Rename... |
+| `rename-<id>` | The title editor shown by Rename... (Enter keeps, Esc restores). |
+| `field-<id>-File`, `browse-<id>` | A Sub-Tree node's File (its `title` names the resolved tree) and its "…" button (`dialog-choose-subtree`). |
 | `conn-<parent>-<child>` | A connection (SVG group: line, wide hit path, order badge). |
 | `order-<parent>-<child>` | The order number of that connection (its text is the number). |
 | `drag-line` | The line while a connection is dragged; class `valid` when it is green. |
@@ -47,7 +48,7 @@ digits), `<name>` a blackboard entry name, `<key>` a document key such as `robot
 | `btn-findings` | Opens the findings list (shown while there are findings). |
 | `breadcrumb` | The trees shown (`robot › patrol`), ` *` when the shown one has unsaved changes. |
 | `executor-picker` | The executor picker (a `select`). |
-| `attached-count` | Browsers attached to the session. |
+| `attached-count` | Browsers attached to the session (`?` while offline). |
 | `connection-state` | Connection indicator; `offline` (an extra banner) while reconnecting. |
 
 ## Side panel
@@ -57,7 +58,7 @@ digits), `<name>` a blackboard entry name, `<key>` a document key such as `robot
 | `tab-blackboard`, `tab-log`, `tab-inspector` | Panel tabs. |
 | `blackboard` | The Blackboard tab. |
 | `bb-row-<name>` | An entry's row (`data-entry-id` holds its id; class `stale` greys it). |
-| `bb-select-<name>`, `bb-name-<name>`, `bb-value-<name>`, `bb-items-<name>`, `bb-reset-<name>`, `bb-source-<name>`, `bb-age-<name>`, `bb-up-<name>`, `bb-down-<name>` | The row's controls (`bb-value-` is the value editor, or the "show all" button of a shortened value). |
+| `bb-select-<name>`, `bb-name-<name>`, `bb-value-<name>`, `bb-items-<name>`, `bb-reset-<name>`, `bb-source-<name>`, `bb-age-<name>`, `bb-problem-<name>`, `bb-up-<name>`, `bb-down-<name>` | The row's controls (`bb-value-` is the value editor, or the "show all" button of a shortened value; `bb-problem-` why a source cannot feed the entry). |
 | `bb-select-all`, `bb-new-type`, `bb-add`, `bb-remove` | Select All, the type of a new entry, Add Entry, Remove Entries. |
 | `log-pane` | The Log tab. |
 | `log-line` | Each log line (not unique; `data-seq` is its number). |
@@ -74,7 +75,8 @@ digits), `<name>` a blackboard entry name, `<key>` a document key such as `robot
 | `dialog-files` | Files (New, Load, Save As, Files...): `file-list`, `file-<key>`, `file-name`, `btn-file-ok`, `btn-file-close`, `btn-file-rename`, `btn-file-delete`, `btn-file-download`, `file-upload-input`, `file-upload-dir`, `btn-file-upload`. |
 | `dialog-configure` | Configure: `cfg-tick`, `cfg-mode`, `cfg-log-level`, `cfg-restore`, `cfg-memory`, `cfg-wait-for-cancels`, `cfg-cancel-timeout`, `cfg-on-unconfirmed`, `btn-configure-ok`, `btn-configure-cancel`. |
 | `dialog-findings` | Findings: `finding-<n>` (click to show its node), `btn-execute-anyway`, `btn-findings-close`. |
-| `dialog-source` | Source...: `src-topic`, `src-type`, `src-field`, `src-rate`, `src-age`, `btn-src-test`, `src-test-result`, `btn-src-ok`, `btn-src-remove`, `btn-src-cancel`. |
+| `dialog-add-entry` | Add Entry: `add-entry-name`, `add-entry-type`, `add-entry-value`, `add-entry-error`, `btn-add-entry-ok`, `btn-add-entry-cancel`. |
+| `dialog-source` | Source...: `src-topic`, `src-type`, `src-field` (with the type's field paths in `src-fields`), `src-rate`, `src-age`, `btn-src-test`, `src-test-result`, `btn-src-ok`, `btn-src-remove`, `btn-src-cancel`. |
 | `dialog-entry-value` | The whole value of a shortened entry: `entry-value-text`, `btn-entry-value-save`, `btn-entry-value-close`. |
-| `dialog-unsaved`, `dialog-replace`, `dialog-choose-file`, `dialog-revert`, `dialog-recovery`, `dialog-add-entry`, `dialog-rename-file`, `dialog-delete-file`, `dialog-question` | Questions. Inside: `dialog-input`, `dialog-choices`, and buttons `dialog-btn-<value>`: `save`, `discard`, `cancel` (unsaved); `yes`, `cancel` (replace, revert); `use`, `cancel` (choose file); `yes`, `no` (recovery: Restore, Discard); `ok`, `cancel` (others). |
+| `dialog-unsaved`, `dialog-replace`, `dialog-choose-file`, `dialog-choose-subtree`, `dialog-revert`, `dialog-recovery`, `dialog-rename-file`, `dialog-delete-file`, `dialog-question` | Questions. Inside: `dialog-input`, `dialog-choices`, and buttons `dialog-btn-<value>`: `save`, `discard`, `cancel` (unsaved); `yes`, `cancel` (replace: Save As, New, upload; revert); `use` (Open), `create` (Create New Tree), `cancel` (choose file); `yes`, `no` (recovery: Restore, Discard; closed when another tab answers); `ok`, `cancel` (others). |
 | `notice` | A notice (not unique). |

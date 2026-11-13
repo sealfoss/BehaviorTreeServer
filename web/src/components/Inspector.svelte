@@ -3,24 +3,13 @@
   // from the executor's description of the interface (ask interface); bindings, outputs and the
   // fields pinned on the node are edited here, and so are the per-node cancel options.
   import { pins } from '../lib/canvasState.svelte';
+  import { interfaceRows as rows, interfaceSections, type IfaceField, type RowKind } from '../lib/iface';
   import { findNode } from '../lib/ops';
   import { session } from '../lib/stores/session.svelte';
   import type { WireNode } from '../lib/types';
   import { parsePyLiteral, pyDisplay, pyLookup, type PyValue } from '../lib/wire';
   import DoubleInput from './DoubleInput.svelte';
   import FieldEditor from './FieldEditor.svelte';
-
-  interface IfaceField {
-    name: string;
-    kind: string;
-    fields?: IfaceField[];
-    default?: unknown;
-  }
-  interface Row {
-    path: string; // inside the section's field: pose.position.x
-    depth: number;
-    kind: 'bool' | 'int' | 'float' | 'str' | 'msg' | 'array';
-  }
 
   const doc = $derived(session.shownDoc);
   const node = $derived.by((): WireNode | undefined => {
@@ -30,7 +19,7 @@
     return found && found.type !== 'Notes' && found.type !== 'Group' ? found : undefined;
   });
   const spec = $derived(node ? session.catalog.get(node.type) : undefined);
-  const readOnly = $derived(session.readOnly);
+  const readOnly = $derived(!session.canEdit);
   const special = $derived(spec?.special ?? null);
   const ros = $derived(special === 'call_action' || special === 'call_service' || special === 'publish');
   const isLeaf = $derived(spec?.kind === 'leaf' || (!spec && node?.type !== 'Root'));
@@ -66,55 +55,9 @@
         iface = {};
         return;
       }
-      iface = sections(reply.interface);
+      iface = interfaceSections(reply.interface, inputField);
     });
   });
-
-  /** The described interface by section (Goal, Result, Feedback, Request, Response, Message). */
-  function sections(data: unknown): Record<string, IfaceField[]> {
-    const result: Record<string, IfaceField[]> = {};
-    const names = ['Goal', 'Result', 'Feedback', 'Request', 'Response', 'Message'];
-    const asFields = (value: unknown): IfaceField[] | null => {
-      if (Array.isArray(value)) return value as IfaceField[];
-      if (value && typeof value === 'object' && Array.isArray((value as { fields?: unknown }).fields)) return (value as { fields: IfaceField[] }).fields;
-      return null;
-    };
-    const direct = asFields(data);
-    if (direct) {
-      result[inputField] = direct;
-      return result;
-    }
-    if (data && typeof data === 'object') {
-      for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
-        const name = names.find((n) => n.toLowerCase() === key.toLowerCase());
-        const fields = asFields(value);
-        if (name && fields) result[name] = fields;
-      }
-    }
-    return result;
-  }
-
-  function kindOf(field: IfaceField): Row['kind'] {
-    if (field.fields?.length) return 'msg';
-    const kind = String(field.kind ?? '').toLowerCase();
-    if (kind.startsWith('bool')) return 'bool';
-    if (/^(u?int|integer|byte|char|octet)/.test(kind)) return 'int';
-    if (/^(float|double)/.test(kind)) return 'float';
-    if (/string/.test(kind)) return 'str';
-    if (/(array|sequence|\[)/.test(kind)) return 'array';
-    return kind === 'message' || kind === 'msg' || kind === 'nested' ? 'msg' : 'str';
-  }
-
-  function rows(fields: IfaceField[] | undefined, prefix = '', depth = 0): Row[] {
-    const result: Row[] = [];
-    for (const field of fields ?? []) {
-      const path = prefix ? `${prefix}.${field.name}` : field.name;
-      const kind = kindOf(field);
-      result.push({ path, depth, kind });
-      if (kind === 'msg') result.push(...rows(field.fields, path, depth + 1));
-    }
-    return result;
-  }
 
   const inputValue = $derived.by((): PyValue | null => {
     try {
@@ -129,7 +72,7 @@
     return value ? pyDisplay(value) : '';
   }
 
-  function setPath(path: string, kind: Row['kind'], value: unknown): void {
+  function setPath(path: string, kind: RowKind, value: unknown): void {
     if (!node || !doc) return;
     void session.sendOp(doc.key, { op: 'node.set_field', id: node.id, field: inputField, path, kind: kind === 'array' ? 'other' : kind, value });
   }

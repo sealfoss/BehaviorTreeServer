@@ -12,6 +12,9 @@ export type Level =
   | { kind: 'doc'; doc: string; via: string | null; prefix: string; zoom?: number; panX?: number; panY?: number }
   | { kind: 'bundle'; exec: string; tree: string; via: string | null; prefix: string; title: string; watched: boolean; zoom?: number; panX?: number; panY?: number };
 
+/** Below this zoom nodes show title and status only (design 11.3). */
+export const LOW_DETAIL_ZOOM = 0.4;
+
 export interface NodeSize {
   w: number;
   h: number;
@@ -30,6 +33,10 @@ export class ViewStore {
   selection = new SvelteSet<string>();
   selectedConnection = $state<{ parent: string; child: string } | null>(null);
   sizes = $state<Record<string, NodeSize>>({});
+
+  get lowDetail(): boolean {
+    return this.zoom < LOW_DETAIL_ZOOM;
+  }
 
   get level(): Level | undefined {
     return this.stack[this.stack.length - 1];

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  containerItems, convertLiteral, doubleFromWire, doubleToWire, fileValueToPy, normaliseDoubleText, parseDoubleText, parseIntText, parsePyLiteral, pyRepr,
+  containerItems, doubleFromWire, doubleToWire, fileValueToPy, normaliseDoubleText, parseDoubleText, parseIntText, parsePyLiteral, pyRepr,
   pyStr, splitFieldPath,
 } from '../src/lib/wire';
 
@@ -90,17 +90,5 @@ describe('Python literal text', () => {
   it('splits field paths', () => {
     expect(splitFieldPath('Goal.waypoints[0].x')).toEqual(['Goal', 'waypoints', 0, 'x']);
     expect(splitFieldPath('pose.position.x')).toEqual(['pose', 'position', 'x']);
-  });
-});
-
-describe('literals of Evaluation and Set follow the entry type (the widget\'s convert_literal)', () => {
-  it('converts numbers, booleans and text', () => {
-    expect(convertLiteral(5, 'Integer', 'Double')).toBe('5.0');
-    expect(convertLiteral(5, 'Integer', 'String')).toBe('5');
-    expect(convertLiteral('2.6', 'Double', 'Integer')).toBe(3);
-    expect(convertLiteral('yes', 'String', 'Bool')).toBe(true);
-    expect(convertLiteral(true, 'Bool', 'Integer')).toBe(1);
-    expect(convertLiteral('word', 'String', 'Double')).toBe('0.0');
-    expect(convertLiteral(3, 'Integer', 'List')).toBe('[]');
   });
 });

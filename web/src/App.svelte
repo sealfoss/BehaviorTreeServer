@@ -30,6 +30,14 @@
     ui.dialogEntry = null;
   }
 
+  // The browser tab names the trees shown, as the widget's window title does.
+  $effect(() => {
+    const files = session.view.stack.map((level) =>
+      level.kind === 'doc' ? (session.docs.get(level.doc)?.path || `${level.doc}_BT.json`) : level.title,
+    );
+    document.title = files.length ? `Behavior Tree - ${files.join(' > ')}` : 'Behavior Tree';
+  });
+
   // Selecting one ROS leaf opens its whole form in the inspector (design 11.3).
   $effect(() => {
     if (session.view.selection.size !== 1) return;
@@ -55,8 +63,9 @@
           { label: 'Discard', value: 'no' },
         ],
         testid: 'dialog-recovery',
-      })
+      }, key)
       .then(async (answer) => {
+        // null: dismissed, or answered in another tab (the gateway said so).
         if (answer) await session.file('recover', { doc: key, accept: answer.button === 'yes' });
         ui.recovery = ui.recovery.filter((item) => item !== key);
         offering = false;

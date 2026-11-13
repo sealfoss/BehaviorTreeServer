@@ -12,8 +12,10 @@ let observer: ResizeObserver | null = null;
 const sinks = new Map<Element, { id: string; sink: Sink }>();
 
 function measureElement(element: HTMLElement): NodeSize {
-  const parent = element.querySelector<HTMLElement>('[data-label="parent"]');
-  const children = element.querySelector<HTMLElement>('[data-label="children"]');
+  // A label not drawn (title and status only, below 40% zoom) has no box: the node's edges stand in.
+  const shown = (label: HTMLElement | null) => (label && label.offsetParent !== null ? label : null);
+  const parent = shown(element.querySelector<HTMLElement>('[data-label="parent"]'));
+  const children = shown(element.querySelector<HTMLElement>('[data-label="children"]'));
   return {
     w: element.offsetWidth,
     h: element.offsetHeight,

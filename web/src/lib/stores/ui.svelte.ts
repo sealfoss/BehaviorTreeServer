@@ -34,6 +34,8 @@ export type PanelDialog = 'files' | 'configure' | 'source' | 'findings' | 'entry
 export class UiStore {
   notices = $state<Notice[]>([]);
   question = $state<(Question & { resolve: (answer: { button: string; input: string } | null) => void }) | null>(null);
+  /** The document a question is about (the recovery offer), so other tabs' answers can close it. */
+  questionKey = $state<string | null>(null);
   menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
   dialog = $state<PanelDialog>(null);
   /** The entry the Source dialog (or the whole-value view) is for. */
@@ -57,16 +59,18 @@ export class UiStore {
   }
 
   /** Ask a question; resolves with the button and the text typed, or null when dismissed. */
-  ask(question: Question): Promise<{ button: string; input: string } | null> {
+  ask(question: Question, key: string | null = null): Promise<{ button: string; input: string } | null> {
     this.question?.resolve(null);
     return new Promise((resolve) => {
       this.question = { ...question, resolve };
+      this.questionKey = key;
     });
   }
 
   answer(answer: { button: string; input: string } | null): void {
     const question = this.question;
     this.question = null;
+    this.questionKey = null;
     question?.resolve(answer);
   }
 

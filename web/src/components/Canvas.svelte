@@ -4,7 +4,7 @@
   // widget's gestures.
   import { canvasState, type LabelRef } from '../lib/canvasState.svelte';
   import { copyText, planPaste, readClipboard } from '../lib/clipboard';
-  import { childOrder, normaliseRect, rectContains, rectsIntersect, type Point, type Rect } from '../lib/geometry';
+  import { childOrder, connectionPath, normaliseRect, rectContains, rectsIntersect, type Point, type Rect } from '../lib/geometry';
   import { newId } from '../lib/ids';
   import { childIds, findNode, parentId } from '../lib/ops';
   import { isEditable, primary } from '../lib/platform';
@@ -19,14 +19,13 @@
 
   const view = session.view;
   const CULL_FROM = 150; // nodes; smaller trees are drawn whole (design 11.3)
-  const LOW_DETAIL_ZOOM = 0.4;
   const GROUP_COLORS: [string, string][] = [
     ['Blue', '#3d7cc9'], ['Green', '#2e9d4f'], ['Red', '#d04545'], ['Orange', '#e08a1e'], ['Purple', '#8a5cc2'], ['Teal', '#1f9e9e'], ['Gray', '#7a7a7a'],
   ];
 
   let el: HTMLDivElement;
   const doc = $derived(session.shownDoc);
-  const readOnly = $derived(session.readOnly);
+  const readOnly = $derived(!session.canEdit);
   const groups = $derived(doc?.nodes.filter((n) => n.type === 'Group') ?? []);
   const notes = $derived(doc?.nodes.filter((n) => n.type === 'Notes') ?? []);
   const treeNodes = $derived(doc?.nodes.filter((n) => n.type !== 'Group' && n.type !== 'Notes') ?? []);
@@ -547,7 +546,13 @@
     // Done by the gateway, which sends the resulting ordinary operations back (contract 5.3).
     // The sizes as drawn let the gateway order the new tree's children as the canvas does.
     const sizes = Object.fromEntries(doc.nodes.map((item) => [item.id, [Math.round(rectOf(item).w), Math.round(rectOf(item).h)]]));
-    await session.sendOp(doc.key, { op: 'group.promote', id: node.id, name: folder + node.title, sizes }, false);
+    const key = doc.key;
+    const before = new Set(doc.nodes.map((item) => item.id));
+    const reply = await session.sendOp(key, { op: 'group.promote', id: node.id, name: folder + node.title, sizes }, false);
+    // The operations come before the answer: the new Sub-Tree node is there now, and is selected
+    // (the widget: "titled with the group name and selected").
+    const added = reply?.t === 'ok' ? (session.docs.get(key)?.nodes ?? []).filter((item) => !before.has(item.id) && item.type === 'Sub-Tree') : [];
+    if (added.length) view.select(added.map((item) => item.id));
   }
 
   // ------------------------------------------------------------------------------ keyboard
@@ -718,7 +723,7 @@
   {#if doc}
     <div
       class="world"
-      class:lod-low={view.zoom < LOW_DETAIL_ZOOM}
+      class:lod-low={view.lowDetail}
       data-testid="world"
       style="transform: translate({view.panX}px, {view.panY}px) scale({view.zoom})"
     >
@@ -728,10 +733,16 @@
       <div class="layer layer-notes">
         {#each notes as node (node.id)}<NoteView {node} {doc} {readOnly} />{/each}
       </div>
-      <Connections {doc} {dragLine} />
+      <Connections {doc} />
       <div class="layer layer-nodes">
         {#each visibleNodes as node (node.id)}<NodeView {node} {doc} {readOnly} />{/each}
       </div>
+      {#if dragLine}
+        <!-- Above the nodes, so the line stays visible while it crosses them. -->
+        <svg class="connections drag-layer" aria-hidden="true">
+          <path class="drag-line" class:valid={dragLine.valid} d={connectionPath(dragLine.from, dragLine.to)} data-testid="drag-line" />
+        </svg>
+      {/if}
       {#if band}
         <div class="band" style="transform: translate({band.x}px, {band.y}px); width: {band.w}px; height: {band.h}px"></div>
       {/if}
@@ -739,7 +750,7 @@
   {:else}
     <div class="empty">{session.executors.online ? 'No tree is open. Use New or Load.' : 'Connecting…'}</div>
   {/if}
-  {#if readOnly}
+  {#if session.readOnly}
     <div class="read-only-banner" data-testid="read-only-banner">Read-only: {session.view.level?.kind === 'bundle' ? session.view.level.title : ''}</div>
   {/if}
 </div>

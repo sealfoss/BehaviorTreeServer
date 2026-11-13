@@ -2,10 +2,11 @@
   // Connection lines as SVG paths in the world layer, each with its order number (design 11.3).
   // A line follows the measured labels of its two nodes; only the lines of a moved node change.
   import { badgeCenter, connectionPath, type Point } from '../lib/geometry';
+  // The line of a connection being dragged is drawn by the canvas above the nodes.
   import { estimateSize, session } from '../lib/stores/session.svelte';
   import type { TreeDocument, WireNode } from '../lib/types';
 
-  let { doc, dragLine }: { doc: TreeDocument; dragLine: { from: Point; to: Point; valid: boolean } | null } = $props();
+  let { doc }: { doc: TreeDocument } = $props();
 
   const byId = $derived(new Map(doc.nodes.map((node) => [node.id, node])));
   const lines = $derived.by(() => {
@@ -54,7 +55,4 @@
       </g>
     {/if}
   {/each}
-  {#if dragLine}
-    <path class="drag-line" class:valid={dragLine.valid} d={connectionPath(dragLine.from, dragLine.to)} data-testid="drag-line" />
-  {/if}
 </svg>

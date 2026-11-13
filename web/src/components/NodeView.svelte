@@ -58,7 +58,15 @@
     return connected ? 'connected' : 'disconnected';
   }
 
+  /**
+   * The width drawn with all editors. Below 40% zoom only title and status are drawn, but the
+   * node keeps this width, so its centre, and with it the child order (design 11.4), does not
+   * change with the zoom. (A node first drawn below 40% has no full width yet.)
+   */
+  let fullWidth = $state(0);
+
   function sink(id: string, size: NodeSize): void {
+    if (!session.view.lowDetail) fullWidth = size.w;
     const old = session.view.sizes[id];
     if (!old || old.w !== size.w || old.h !== size.h || old.parentTop !== size.parentTop || old.childrenBottom !== size.childrenBottom) {
       session.view.sizes[id] = size;
@@ -77,11 +85,11 @@
   data-testid="node-{node.id}"
   data-status={statusName.toLowerCase()}
   data-type={node.type}
-  style="transform: translate({node.x}px, {node.y}px)"
+  style="transform: translate({node.x}px, {node.y}px){session.view.lowDetail && fullWidth ? `; min-width: ${fullWidth}px` : ''}"
   use:measured={{ id: node.id, sink }}
 >
   {#if hasParentLabel}
-    <div class="frame">
+    <div class="frame label-frame">
       <span class="conn-label" data-label="parent" data-node-id={node.id} data-state={labelState('parent', hasParent)} data-testid="parent-{node.id}">Parent</span>
     </div>
   {/if}
@@ -102,6 +110,7 @@
           }
         }}
         onblur={(e) => {
+          if (canvasState.renaming !== node.id) return; // Esc already ended the editing: keep the old title
           const title = (e.currentTarget as HTMLInputElement).value.trim();
           canvasState.renaming = null;
           if (title && title !== node.title) void session.sendOp(doc.key, { op: 'node.set_title', id: node.id, title });
@@ -118,7 +127,7 @@
     </div>
   {/if}
   {#if hasChildrenLabel}
-    <div class="frame">
+    <div class="frame label-frame">
       <span class="conn-label" data-label="children" data-node-id={node.id} data-state={labelState('children', hasChildren)} data-testid="children-{node.id}">{childrenText}</span>
     </div>
   {/if}

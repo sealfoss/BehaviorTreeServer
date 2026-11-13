@@ -28,6 +28,8 @@
   }
 
   function finish(input: HTMLInputElement, keep: boolean): void {
+    // Esc ends the editing first; the blur that follows when the editor goes must not commit.
+    if (canvasState.editingGroup !== node.id) return;
     const title = input.value.trim();
     canvasState.editingGroup = null;
     if (keep && title && title !== node.title) void session.sendOp(doc.key, { op: 'node.set_title', id: node.id, title });

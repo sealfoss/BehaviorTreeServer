@@ -5,6 +5,7 @@
 
 import { childOrder, sameOrder, type OrderItem } from '../geometry';
 import { childIds, findNode, isStructural, parentId, type Op } from '../ops';
+import { resolveSubtree, treeKeyOf } from '../paths';
 import { ConnectionLost, GatewayConnection, gatewayUrl, type Incoming, type Outgoing, type Reply, type SocketLike } from '../protocol';
 import type {
   Bundle, CatalogEntry, Entry, ExecutorInfo, FileQuestion, Finding, LogLine, RunMessage, Snapshot, StBody, TreeDocument, WireNode,
@@ -183,6 +184,13 @@ export class Session {
     const key = String(message.doc);
     const document = message.document as TreeDocument | null;
     const event = String(message.event);
+    if (event === 'recovered' || event === 'recovery_declined') {
+      // Another tab answered the recovery offer (contract 5.6): it is no longer open here.
+      this.ui.recovery = this.ui.recovery.filter((item) => item !== key);
+      if (this.ui.question?.testid === 'dialog-recovery' && this.ui.questionKey === key) this.ui.answer(null);
+      if (document) this.docs.set(document);
+      return;
+    }
     if (event === 'closed' || !document) {
       this.docs.remove(key);
       this.dropLevelsOf(key);
@@ -224,7 +232,8 @@ export class Session {
     if (message.exec === this.executors.attached && message.event === 'started') this.log.clear();
     if (message.exec === this.executors.attached && message.event === 'ended') {
       const outcome = ['', 'Succeeded', 'Failed', 'Stopped', 'Error'][message.outcome ?? 0] ?? '';
-      if (outcome) this.ui.notify(message.outcome === 4 ? 'error' : 'info', `Execution finished: ${outcome}${message.message ? ` (${message.message})` : ''}`);
+      const detail = message.message && message.message.toLowerCase() !== outcome.toLowerCase() ? ` (${message.message})` : '';
+      if (outcome) this.ui.notify(message.outcome === 4 ? 'error' : 'info', `Execution finished: ${outcome}${detail}`);
     }
   }
 
@@ -247,6 +256,20 @@ export class Session {
 
   get readOnly(): boolean {
     return this.view.level?.kind === 'bundle';
+  }
+
+  /**
+   * The outcome of the last run, when it ran the tree shown now: after New or Load the outcome
+   * of the earlier tree's run is not this tree's (the gateway names a run after its tree).
+   */
+  get lastOutcome(): number {
+    const run = this.run.run(this.executors.attached);
+    return !run.label || run.label === this.docs.root ? run.outcome : 0;
+  }
+
+  /** Edits need the gateway: none while offline, none on a run's tree. */
+  get canEdit(): boolean {
+    return this.executors.online && !this.readOnly;
   }
 
   /** The structure is locked while the tree executes or starts (design 9.3, 9.5). */
@@ -358,14 +381,14 @@ export class Session {
         this.ui.notify('warning', `${action}: ${reply.reason ?? 'refused'}`);
         return null;
       }
-      const answer = await this.answerQuestion(question, reply.reason);
+      const answer = await this.answerQuestion(question, reply.reason, args);
       if (!answer) return null;
       extra = { ...extra, ...answer };
     }
     return null;
   }
 
-  private async answerQuestion(question: FileQuestion, reason?: string): Promise<Record<string, unknown> | null> {
+  private async answerQuestion(question: FileQuestion, reason?: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown> | null> {
     if (question.kind === 'unsaved') {
       const answer = await this.ui.ask({
         title: 'Unsaved changes',
@@ -395,16 +418,22 @@ export class Session {
     const trees = list?.t === 'ok' ? ((list.trees ?? []) as { key: string }[]).map((tree) => tree.key) : [];
     const answer = await this.ui.ask({
       title: 'Choose the file',
-      text: `The file ${question.file} of this node cannot be found. Choose a tree file, or type a name to create it.`,
+      text: `The file ${question.file || '(none)'} of this node cannot be found. Open an existing tree, or create the tree named below holding only a Root.`,
       buttons: [
-        { label: 'Use', value: 'use', primary: true },
+        { label: 'Open', value: 'use', primary: true },
+        { label: 'Create New Tree', value: 'create' },
         { label: 'Cancel', value: 'cancel' },
       ],
-      input: { label: 'File', value: question.file },
+      // Tree names as the file list has them (relative to the trees folder), not as File holds them.
+      input: { label: 'Tree', value: (typeof args.doc === 'string' && resolveSubtree(args.doc, question.file)) || treeKeyOf(question.file) },
       choices: trees,
       testid: 'dialog-choose-file',
     });
-    return answer?.button === 'use' && answer.input.trim() ? { file: answer.input.trim() } : null;
+    const name = answer?.input.trim() ?? '';
+    if (!answer || answer.button === 'cancel' || !name) return null;
+    // A name that is not a tree yet is created (the widget's offer), never asked about again.
+    if (answer.button === 'create' || !trees.includes(treeKeyOf(name))) return { file: name, create: true };
+    return { file: name };
   }
 
   // ------------------------------------------------------------------------------ child order
