@@ -262,7 +262,7 @@ from rclpy.task import Future
 from rclpy.action import ActionServer
 from example_interfaces.action import Fibonacci
 rclpy.init()
-node = rclpy.create_node("lost_server")
+node = rclpy.create_node(sys.argv[2] if len(sys.argv) > 2 else "lost_server")
 async def execute(handle):
     await Future()
 server = ActionServer(node, Fibonacci, sys.argv[1], execute_callback=execute)
@@ -313,20 +313,39 @@ def test_call_action_cancelled_by_the_server(h):
 
 def test_call_action_timeout_cancel_answered_unknown_goal(h):
     """A restarted server answers the Timeout's cancel "unknown goal": the node settles at once
-    and fails "timed out", and the Selector goes on (no unconfirmed cancel, no stopped tree)."""
+    and fails "timed out", and the Selector goes on (no unconfirmed cancel, no stopped tree).
+
+    The server is killed only once it has accepted the goal (killed before its reply, the leaf
+    is halted before the goal reply and rightly waits 5 s for it, design 6.5 and 16), and the
+    Timeout passes only after the restarted server is on the network."""
+    timeout = 6.0
     procs = [subprocess.Popen([sys.executable, "-c", SERVER_SCRIPT, f"{h.ns}/restart"])]
     try:
         h.ready_action(f"{h.ns}/restart")
-        node = call_action(f"{h.ns}/restart", Timeout=3.0)
+        node = call_action(f"{h.ns}/restart", Timeout=timeout)
         fallback = leaf("Set", "ok", ValueName="ok", CompareTo=None, LiteralValue=True)
         run = h.run(bundle(node, fallback, composite="Selector"), [entry("ok", "Bool", False)])
-        h.spin_to(0.5)
+        action_leaf = run.runner.node(1).leaf
+        accepted = lambda: action_leaf._goal is not None and action_leaf._goal.handle is not None  # noqa: E731
+        assert h.spin_until(accepted, 5.0), "the server did not accept the goal"
         procs[0].send_signal(signal.SIGKILL)
         procs[0].wait(timeout=10)
-        procs.append(subprocess.Popen([sys.executable, "-c", SERVER_SCRIPT, f"{h.ns}/restart"]))
-        result = h.finish(run, 15.0)
-        assert near(run.sink.status_times(1, "C")[0], 3.0)
-        assert run.sink.status_times(1, "F")[0] - 3.0 < 1.0
+        procs.append(subprocess.Popen([sys.executable, "-c", SERVER_SCRIPT, f"{h.ns}/restart", "restarted_server"]))
+        cancel_service = f"{h.ns}/restart/_action/cancel_goal"
+
+        def restarted() -> bool:
+            try:
+                services = h.node.get_service_names_and_types_by_node("restarted_server", "/")
+            except Exception:  # noqa: BLE001 - the node is not known yet
+                return False
+            return any(name == cancel_service for name, _ in services)
+
+        assert h.spin_until(restarted, timeout - 1.0), "the restarted server did not come up in time"
+        assert h.now() < timeout - 0.5
+        result = h.finish(run, 20.0)
+        cancelling = run.sink.status_times(1, "C")[0]
+        assert near(cancelling, timeout)
+        assert run.sink.status_times(1, "F")[0] - cancelling < 1.0
         assert run.sink.error_of(1) == "timed out"
         assert result.outcome == Outcome.SUCCEEDED and result.unconfirmed_cancels == 0
         assert run.blackboard.get("ok") is True
