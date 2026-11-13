@@ -237,7 +237,9 @@ class GoalJournal:
         for item in list(self._goals.values()):
             if not item.unsettled:
                 continue
-            client = self._client(item.action)
+            client = self._client(item)
+            if client is None:
+                continue
             ready = client.service_is_ready()
             reappeared = ready and not self._ready.get(item.action, False)
             self._ready[item.action] = ready
@@ -245,16 +247,28 @@ class GoalJournal:
                 self._send_cancel(item)
         self._arm()
 
-    def _client(self, action: str) -> Any:
+    def _client(self, item: _Goal) -> Any:
+        """The cancel client of the goal's action; None when the action name is not a valid ROS
+        name (a damaged journal line): the goal is dropped then, so a bad line cannot stop the
+        executor from starting."""
+        action = item.action
         client = self._clients.get(action)
         if client is None:
-            client = self._node.create_client(CancelGoal, f"{action.rstrip('/')}/_action/cancel_goal")
+            try:
+                client = self._node.create_client(CancelGoal, f"{action.rstrip('/')}/_action/cancel_goal")
+            except Exception as error:  # noqa: BLE001 - rclpy raises several kinds for bad names
+                self._log(LogLevel.ERROR, f"Goal {item.goal} of the journal names the action {action!r}, which "
+                                          f"cannot be cancelled ({error}); it is dropped from the journal")
+                self.done(item.goal)
+                return None
             self._clients[action] = client
         return client
 
     def _send_cancel(self, item: _Goal) -> None:
         item.last_sent = time.monotonic()
-        client = self._client(item.action)
+        client = self._client(item)
+        if client is None:
+            return
         self._ready[item.action] = client.service_is_ready()
         request = CancelGoal.Request()
         request.goal_info = GoalInfo()

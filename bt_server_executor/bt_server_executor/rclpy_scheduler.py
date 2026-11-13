@@ -3,8 +3,10 @@
 * ``now()`` is the host's steady clock (``time.monotonic``, the clock rcl's steady timers use);
   ``ros_now()`` is the node's ROS clock, which follows ``/clock`` with ``use_sim_time`` (5.4).
 * ``call_soon(fn)`` is safe from any thread: ``fn`` goes on a queue and the executor is woken
-  to drain it on its thread. This is how worker threads, rclpy callbacks of other threads and
-  signal handlers hand work to the engine thread. The wake-up is ``executor.create_task``,
+  to drain it on its thread. This is how worker threads and rclpy callbacks of other threads
+  hand work to the engine thread. It takes a lock, so a signal handler must not call it (the
+  handler may interrupt the engine thread while that holds the lock): the executor's handlers
+  only count signals, and its main loop acts on them. The wake-up is ``executor.create_task``,
   which is thread-safe in both executors: the ``EventsExecutor`` of Lyrical refuses guard
   conditions ("Guard conditions not supported"), so the guard condition of design 8.2 is the
   executor's own task queue here.

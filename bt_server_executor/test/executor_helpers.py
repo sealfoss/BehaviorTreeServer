@@ -253,11 +253,14 @@ class ExecutorProcess:
 
 class FibServer:
     """A Fibonacci action server that accepts every goal and runs until it is cancelled, or
-    finishes after ``finish_after`` seconds; cancels are accepted (see the module docs)."""
+    finishes after ``finish_after`` seconds; cancels are accepted, and confirmed (the goal ends
+    canceled) ``cancel_delay`` seconds after they arrive (see the module docs)."""
 
-    def __init__(self, ros: RosHelper, name: str, finish_after: float | None = None) -> None:
+    def __init__(self, ros: RosHelper, name: str, finish_after: float | None = None, cancel_delay: float = 0.0) -> None:
         self.name = name
         self.finish_after = finish_after
+        self.cancel_delay = cancel_delay
+        self.confirmed: list[tuple[str, float]] = []
         self.goals: list[tuple[str, float]] = []
         self.cancels: list[tuple[str, float]] = []
         self._closed = False
@@ -273,9 +276,13 @@ class FibServer:
     async def _execute(self, handle: Any) -> Fibonacci.Result:
         self.goals.append((bytes(bytearray(handle.goal_id.uuid)).hex(), time.monotonic()))
         start = time.monotonic()
+        goal_id = bytes(bytearray(handle.goal_id.uuid)).hex()
         while not self._closed:
             if handle.is_cancel_requested:
+                if self.cancel_delay > 0:
+                    await self._sleep(self.cancel_delay)
                 handle.canceled()
+                self.confirmed.append((goal_id, time.monotonic()))
                 return Fibonacci.Result()
             if self.finish_after is not None and time.monotonic() - start >= self.finish_after:
                 handle.succeed()

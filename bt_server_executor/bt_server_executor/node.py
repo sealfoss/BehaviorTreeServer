@@ -44,6 +44,7 @@ from __future__ import annotations
 import array
 import importlib
 import importlib.util
+import itertools
 import json
 import os
 import signal
@@ -55,6 +56,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import rclpy
+from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Time as TimeMsg
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.exceptions import ParameterUninitializedException
@@ -91,6 +93,10 @@ _LOG_BATCH_MAX = 100
 _GET_LOG_MAX = 1000
 #: Runs whose log files ``~/get_log`` still finds by id.
 _RUNS_KEPT = 50
+#: Detail kinds whose every change is published (not merged with a later one of the node).
+_UNMERGED_DETAILS = ("field", "title")
+#: Shutting down waits this much longer than the largest cancel timeout of the run.
+_SHUTDOWN_MARGIN_S = 1.0
 #: How often the problems of the sources are looked at during a run.
 _PROBLEM_CHECK_S = 0.5
 #: How often unused cached clients are looked for.
@@ -330,7 +336,8 @@ class ExecutorNode(Node):
         self._problems: dict[str, str] = {}  # entry id -> why its source cannot feed it (7.4)
         self._last_bb_at = float("-inf")
         self._details_seq = 0
-        self._details_pending: dict[tuple[int, str], dict] = {}
+        self._details_pending: dict[tuple, dict] = {}
+        self._detail_numbers = itertools.count()
         self._details_timer: Any = None
         self._last_details_at = float("-inf")
         self._log_pending: list[Any] = []
@@ -567,7 +574,11 @@ class ExecutorNode(Node):
         self.scheduler.call_later(_PROBLEM_CHECK_S, lambda: self._check_problems(run))
 
     def on_detail(self, index: int, kind: str, value: object) -> None:
-        self._details_pending[(index, kind)] = {"i": index, "kind": kind, "value": value, "stamp": time.time()}
+        """Details are merged per node and kind until they are published, except ``field`` and
+        ``title``: the gateway changes its document only when each change comes back (9.3), so
+        every one of them is sent."""
+        key: tuple = (index, kind) if kind not in _UNMERGED_DETAILS else (index, kind, next(self._detail_numbers))
+        self._details_pending[key] = {"i": index, "kind": kind, "value": value, "stamp": time.time()}
         self._details_timer = self._rate_limited(self._details_timer, self._last_details_at, self.blackboard_period,
                                                  self._publish_details)
 
@@ -585,8 +596,10 @@ class ExecutorNode(Node):
         self._last_details_at = self.scheduler.now()
 
     def on_state(self, run: _Run, state: State, loop: int) -> None:
-        if run.goal_handle is not None and run.active:
-            run.goal_handle.publish_feedback(ExecuteTree.Feedback(state=int(state), loop_count=loop))
+        handle = run.goal_handle
+        if handle is not None and run.active and handle.status == GoalStatus.STATUS_EXECUTING:
+            # not while the goal is canceling: rclpy refuses feedback then, with a WARNING
+            handle.publish_feedback(ExecuteTree.Feedback(state=int(state), loop_count=loop))
         self.status_changed()
 
     # ----------------------------------------------------------------- ~/execute (4.4, 8.2)
@@ -651,10 +664,10 @@ class ExecutorNode(Node):
         run.goal_handle = goal_handle
         run.uuid = bytes(bytearray(goal_handle.goal_id.uuid))
         run.context.set_run_id(run.uuid)
+        if goal_handle.is_cancel_requested:
+            return self._cancelled_before_start(run, goal_handle)
         run.finished = Future()
         self._start(run)
-        if goal_handle.is_cancel_requested and run.active:
-            run.runner.stop()
         result: RunResult = await run.finished
         response = ExecuteTree.Result(outcome=int(result.outcome), message=result.message,
                                       loops_completed=result.loops_completed,
@@ -670,6 +683,19 @@ class ExecutorNode(Node):
         if self._shutting_down:
             self._exit_soon()
         return response
+
+    def _cancelled_before_start(self, run: _Run, goal_handle: Any) -> ExecuteTree.Result:
+        """The goal was cancelled between its acceptance and its start: it ends canceled, with
+        the outcome *stopped*, without a tick (no leaf has done anything yet)."""
+        run.active = False
+        self._busy = False
+        self.get_logger().info(f"run {run.hex} was cancelled before it started")
+        goal_handle.canceled()
+        self.status_changed()
+        if self._shutting_down:
+            self._exit_soon()
+        return ExecuteTree.Result(outcome=int(Outcome.STOPPED), message="Stopped before it started",
+                                  blackboard_json=dumps_json(run.blackboard.to_list(), indent=None))
 
     def _start(self, run: _Run) -> None:
         """Set the run up and make its first tick (8.2)."""
@@ -822,15 +848,16 @@ class ExecutorNode(Node):
             response.message = str(error)
             return response
         for op in ops:
-            if op.get("op") == "node.set_field":
+            if op.get("op") in ("node.set_field", "node.set_selection"):
                 self._report_field(run.runner, op)
         response.result = Apply.Response.APPLIED
         return response
 
     @staticmethod
     def _report_field(runner: TreeRunner, op: dict) -> None:
-        """A field set through ``~/apply`` goes back as a ``field`` detail of each instance of
-        the node: the gateway changes its document only then (design 9.3)."""
+        """A field (or a choice's selection) set through ``~/apply`` goes back as a ``field``
+        detail of each instance of the node: the gateway changes its document only then (design
+        9.3). A selection comes back as ``{"tree", "id", "field", "selection": index}``."""
         for index in range(len(runner.node_paths)):
             node = runner.node(index)
             fields = getattr(node, "fields", None)
@@ -838,12 +865,15 @@ class ExecutorNode(Node):
                 continue
             if op.get("tree") is not None and getattr(node, "tree_key", None) != op.get("tree"):
                 continue
-            try:
-                value = encode_value(fields.get(op.get("field")))
-            except TypeError:
-                value = None
-            runner.detail(index, "field", {"tree": node.tree_key, "id": node.node_id, "field": op.get("field"),
-                                           "value": value})
+            detail: dict[str, Any] = {"tree": node.tree_key, "id": node.node_id, "field": op.get("field")}
+            if op.get("op") == "node.set_selection":
+                detail["selection"] = op.get("index")
+            else:
+                try:
+                    detail["value"] = encode_value(fields.get(op.get("field")))
+                except TypeError:
+                    detail["value"] = None
+            runner.detail(index, "field", detail)
 
     async def _on_describe(self, request: Describe.Request, response: Describe.Response) -> Describe.Response:
         try:
@@ -926,7 +956,8 @@ class ExecutorNode(Node):
             try:
                 value = fn()
             except Exception as error:  # noqa: BLE001 - handed to the awaiting callback
-                self.scheduler.call_soon(lambda: future.set_exception(error))
+                # bound now: Python unbinds ``error`` when the except block ends
+                self.scheduler.call_soon(lambda failure=error: future.set_exception(failure))
             else:
                 self.scheduler.call_soon(lambda: future.set_result(value))
 
@@ -939,8 +970,9 @@ class ExecutorNode(Node):
 
     # ----------------------------------------------------------------- shutting down (8.2)
     def request_shutdown(self) -> None:
-        """SIGINT or SIGTERM: stop a running tree as Stop does, wait for its cancels up to the
-        cancel timeout, then exit. A second signal exits at once."""
+        """SIGINT or SIGTERM: stop a running tree as Stop does, wait until the run has ended and
+        its result is sent, at most the longest cancel timeout of its leaves plus a second, then
+        exit. A second signal exits at once."""
         if self._shutting_down:
             self.exit_requested = True
             return
@@ -950,8 +982,22 @@ class ExecutorNode(Node):
             self.exit_requested = True
             return
         self.on_log(run, LogLevel.WARNING, "The executor is shutting down: stopping the tree", -1)
-        self._exit_at = self.scheduler.now() + run.context.cancel_timeout_s
+        self._exit_at = self.scheduler.now() + self._longest_cancel_timeout(run) + _SHUTDOWN_MARGIN_S
         run.runner.stop()
+
+    @staticmethod
+    def _longest_cancel_timeout(run: _Run) -> float:
+        """The longest cancel timeout of the run's leaves (their own option, or the tree's)."""
+        longest = run.context.cancel_timeout_s
+        runner = run.runner
+        for index in range(len(runner.node_paths)):
+            timeout = getattr(runner.node(index), "cancel_timeout", None)
+            if callable(timeout):
+                try:
+                    longest = max(longest, float(timeout()))
+                except (TypeError, ValueError):
+                    continue
+        return longest
 
     def _exit_soon(self) -> None:
         """The last run ended while shutting down: let the result reach its client, then exit."""
@@ -982,14 +1028,22 @@ def main(args: list[str] | None = None) -> int:
         executor = SingleThreadedExecutor()
     node = ExecutorNode(executor)
 
+    signals = [0]
+
     def on_signal(signum: int, frame: Any) -> None:
-        node.scheduler.call_soon(node.request_shutdown)
+        # Only a count: a handler runs between two bytecodes of the main thread, which may hold
+        # the scheduler's lock at that moment. The loop below acts on it.
+        signals[0] += 1
 
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
+    handled = 0
     try:
         while not node.should_exit() and rclpy.ok():
             executor.spin_once(timeout_sec=0.1)
+            while handled < signals[0]:
+                handled += 1
+                node.request_shutdown()
     finally:
         node.close()
         executor.shutdown()

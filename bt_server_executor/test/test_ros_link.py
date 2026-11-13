@@ -249,3 +249,97 @@ async def test_ros_link_entries_carry_source_problems_while_they_last(factory, s
     await link.stop(run_id)
     assert await until(lambda: listener.results)
     await link.close()
+
+
+async def test_ros_link_describe_failure_answers_with_the_reason(factory, start_executor):
+    """A question that fails on the executor's worker thread is answered with the reason at once."""
+    executor = start_executor("rl_describe")
+    link, _ = await started_link(factory, executor.name)
+    start = time.monotonic()
+    with pytest.raises(CommandRefused) as refused:
+        await link.describe("interface", {"type": "os/msg/Thing"})
+    assert time.monotonic() - start < 5.0
+    assert str(refused.value)
+    await link.close()
+
+
+async def test_ros_link_repair_reports_updates_newer_than_the_snapshot(factory, start_executor):
+    """4.2: after a gap the snapshot is reported first, then the updates numbered above it, also
+    those that arrived while the snapshot was asked for."""
+    executor = start_executor("rl_order")
+    link, listener = await started_link(factory, executor.name)
+    count_id = new_id()
+    run_id = await link.execute(tree(leaf("TestHold")), [{"id": count_id, "name": "c", "type": "Integer", "value": 0}],
+                                "rl_order", "pytest")
+    for value in (1, 2):
+        await link.apply([{"op": "bb.set_value", "id": count_id, "value": value}])
+        assert await until(lambda: listener.value("c") == value)
+    original = link.snapshot
+
+    async def slow_snapshot():
+        snap = await original()
+        await asyncio.sleep(0.6)
+        return snap
+
+    link.snapshot = slow_snapshot
+    link._bb_seq -= 1  # as if the last update had been lost: the next one shows a gap
+    await link.apply([{"op": "bb.set_value", "id": count_id, "value": 3}])  # reveals the gap
+    await asyncio.sleep(0.25)
+    await link.apply([{"op": "bb.set_value", "id": count_id, "value": 4}])  # arrives during the repair
+    await asyncio.sleep(1.2)
+    assert listener.full_updates >= 2
+    assert listener.value("c") == 4
+    link.snapshot = original
+    await link.stop(run_id)
+    await link.close()
+
+
+class DetailRecorder(Listener):
+    def __init__(self) -> None:
+        super().__init__()
+        self.items: list[dict] = []
+
+    def on_details(self, run_id: str, seq: int, details: list[dict]) -> None:
+        super().on_details(run_id, seq, details)
+        self.items.extend(details)
+
+
+async def choice_run(factory, start_executor, tag: str):
+    executor = start_executor(tag)
+    link = factory.link(executor.name)
+    listener = DetailRecorder()
+    link.subscribe(listener)
+    await link.start()
+    assert await until(lambda: link.online, 20.0)
+    node = leaf("TestChoice")
+    run_id = await link.execute(tree(node), [], tag, "pytest")
+    assert await until(lambda: listener.statuses and listener.statuses[-1].state == 1)
+    return link, listener, node, run_id
+
+
+async def test_ros_link_every_field_change_comes_back(factory, start_executor):
+    """Two field edits of one node within 100 ms both come back as field details (9.3, G-05)."""
+    link, listener, node, run_id = await choice_run(factory, start_executor, "rl_fields")
+    for value in (2.5, 3.5):
+        op = {"op": "node.set_field", "tree": "main", "id": node["id"], "field": "Speed", "value": value}
+        assert (await link.apply([op]))[0] == APPLIED
+    assert await until(lambda: len([i for i in listener.items if i["kind"] == "field"]) >= 2, 3.0)
+    values = [item["value"]["value"] for item in listener.items if item["kind"] == "field"]
+    assert values == [2.5, 3.5]
+    await link.stop(run_id)
+    await link.close()
+
+
+async def test_ros_link_selection_change_comes_back(factory, start_executor):
+    """node.set_selection through ~/apply comes back as a field detail with the selection."""
+    link, listener, node, run_id = await choice_run(factory, start_executor, "rl_selection")
+    op = {"op": "node.set_selection", "tree": "main", "id": node["id"], "field": "Mode", "index": 1}
+    assert (await link.apply([op]))[0] == APPLIED
+    assert await until(lambda: any(i["kind"] == "field" for i in listener.items), 3.0)
+    detail = next(item for item in listener.items if item["kind"] == "field")
+    assert detail["i"] == 1
+    assert detail["value"] == {"tree": "main", "id": node["id"], "field": "Mode", "selection": 1}
+    bad = {"op": "node.set_selection", "tree": "main", "id": node["id"], "field": "Mode", "index": 5}
+    assert (await link.apply([bad]))[0] == 2  # REJECTED
+    await link.stop(run_id)
+    await link.close()

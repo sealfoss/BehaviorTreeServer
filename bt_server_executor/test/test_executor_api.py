@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import signal
 import time
@@ -14,6 +15,7 @@ pytest.importorskip("rclpy")
 pytest.importorskip("bt_server_interfaces")
 
 from action_msgs.msg import GoalStatus  # noqa: E402
+from action_msgs.srv import CancelGoal  # noqa: E402
 from bt_server_interfaces.msg import NodeDetails, RunInfo, TreeStatus  # noqa: E402
 from bt_server_interfaces.srv import Apply, GetLog, GetSnapshot  # noqa: E402
 from executor_helpers import FibServer, goal, leaf, ros, start_executor, tree, unique_ns  # noqa: E402,F401
@@ -344,3 +346,124 @@ def test_X_12_a_run_is_stopped_by_its_id_through_the_cancel_service(ros, start_e
     finally:
         status.close()
         client.destroy()
+
+
+def test_X_09b_shutdown_waits_for_the_longest_cancel_timeout_of_a_node(ros, start_executor, tmp_path):
+    """8.2 with a node whose cancel timeout (9 s) is longer than the tree's (5 s): the cancel,
+    confirmed after 6.5 s, is waited for; the goal gets its result; the journal closes the goal."""
+    ns = unique_ns("x09b")
+    server = FibServer(ros, f"{ns}_server/fib", cancel_delay=6.5)
+    executor = start_executor("x09b", ns=ns)
+    client = ros.action_client(ns)
+    try:
+        fib = leaf("TestFib", Action=server.name)
+        fib["cancel_timeout_ms"] = 9000
+        handle = ros.send(client, goal(tree(fib)))
+        result_future = handle.get_result_async()  # asked for now: the executor is gone afterwards
+        assert ros.wait(lambda: server.goals, 10.0)
+        sent = time.monotonic()
+        executor.signal(signal.SIGTERM)
+        executor.proc.wait(timeout=15)
+        ended = time.monotonic()
+        assert server.confirmed and server.confirmed[0][1] < ended, executor.text()
+        assert 6.5 <= ended - sent < 9.0 + 1.5, ended - sent
+        response = ros.result_of(result_future, 3.0)
+        assert (response.status, response.result.outcome) == (ABORTED, 3)
+        lines = [json.loads(line) for line in (executor.folder / "goals.jsonl").read_text().splitlines()]
+        assert {item["goal"] for item in lines if item["e"] == "sent"} <= {item["goal"] for item in lines if item["e"] == "done"}
+    finally:
+        client.destroy()
+        server.close()
+
+
+def test_X_09c_sigterm_while_the_tree_ticks_fast_ends_the_process(ros, start_executor):
+    """The signal handler takes no lock the interrupted main thread may hold (it only counts)."""
+    for attempt in range(3):
+        executor = start_executor(f"x09c{attempt}")
+        client = ros.action_client(executor.ns)
+        try:
+            bundle = tree(leaf("TestSucceed"), config={"repeat": True, "tick_interval_ms": 1, "log_level": 1})
+            ros.send(client, goal(bundle))
+            time.sleep(0.5)
+            sent = time.monotonic()
+            executor.signal(signal.SIGTERM)
+            executor.proc.wait(timeout=8)
+            assert time.monotonic() - sent < 3.0
+        finally:
+            client.destroy()
+
+
+def test_X_12b_a_goal_cancelled_before_it_starts_never_ticks(ros, start_executor):
+    """A cancel that arrives between the acceptance and the start: canceled, outcome stopped, and
+    no leaf has run (the Fibonacci server never gets a goal of that run)."""
+    ns = unique_ns("x12b")
+    server = FibServer(ros, f"{ns}_server/fib")
+    executor = start_executor("x12b", ns=ns)
+    client = ros.action_client(ns)
+    canceller = ros.node.create_client(CancelGoal, f"{executor.name}/execute/_action/cancel_goal",
+                                       callback_group=ros.group)
+    assert canceller.wait_for_service(timeout_sec=10.0)
+    early = 0
+    try:
+        for _ in range(5):
+            goal_id = uuid.uuid4()
+            sent = client.send_goal_async(goal(tree(leaf("TestFib", Action=server.name))),
+                                          goal_uuid=UUID(uuid=list(goal_id.bytes)))
+            request = CancelGoal.Request()
+            request.goal_info.goal_id.uuid = list(goal_id.bytes)
+            cancelled = canceller.call_async(request)  # right behind the goal
+            handle = ros.result_of(sent)
+            ros.result_of(cancelled)
+            state, result = finish(ros, handle)
+            assert (state, result.outcome) == (CANCELED, 3)
+            if result.message == "Stopped before it started":
+                early += 1
+                time.sleep(0.3)
+                assert len(server.goals) == 0, "a run cancelled before it started sent its goal"
+            else:
+                server.goals.clear()
+        assert early >= 1  # the cancel did arrive before the start at least once
+    finally:
+        ros.node.destroy_client(canceller)
+        client.destroy()
+        server.close()
+
+
+def test_X_12c_no_feedback_while_the_goal_is_canceling(ros, start_executor):
+    """The state changes of a cancelled run (STOPPING, IDLE) are not sent as feedback of a goal
+    that is canceling: rclpy would refuse them with a WARNING."""
+    executor = start_executor("x12c")
+    client = ros.action_client(executor.ns)
+    status = ros.record(TreeStatus, f"{executor.name}/status", STATUS_SUB_QOS)
+    try:
+        feedback: list = []
+        handle = ros.send(client, goal(tree(leaf("TestHold"))), feedback)
+        assert wait_status(ros, status, run_id_of(handle), lambda m: m.state == TreeStatus.STATE_RUNNING)
+        ros.result_of(handle.cancel_goal_async())
+        state, _ = finish(ros, handle)
+        assert state == CANCELED
+        time.sleep(0.3)
+        assert "not in executing state" not in executor.text()
+        assert [item.state for item in feedback] == [TreeStatus.STATE_RUNNING]
+    finally:
+        status.close()
+        client.destroy()
+
+
+def test_X_07b_a_journal_line_with_an_invalid_action_name_is_dropped(ros, start_executor, tmp_path):
+    """A damaged journal line cannot keep the executor from starting (16: a crash loop)."""
+    folder = tmp_path / "x07b"
+    folder.mkdir()
+    bad, good = uuid.uuid4().hex, uuid.uuid4().hex
+    (folder / "goals.jsonl").write_text(
+        json.dumps({"e": "sent", "action": "/rv6/x y", "goal": bad, "run": "", "time": 1.0}) + "\n"
+        + json.dumps({"e": "sent", "action": "/rv6/fine", "goal": good, "run": "", "time": 1.0}) + "\n",
+        encoding="utf-8")
+    executor = start_executor("x07b", folder=folder)
+    ros.action_client(executor.ns).destroy()
+    time.sleep(2.0)
+    assert executor.proc.poll() is None, executor.text()
+    assert "cannot be cancelled" in executor.text()
+    lines = [json.loads(line) for line in (folder / "goals.jsonl").read_text().splitlines()]
+    assert {"e": "done", "goal": bad} in lines
+    assert not any(item["e"] == "done" and item["goal"] == good for item in lines)  # still unsettled

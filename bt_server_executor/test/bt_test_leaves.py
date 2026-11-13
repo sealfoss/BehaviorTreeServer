@@ -68,6 +68,12 @@ class TestHold(AsyncLeaf):
         ctx.detail("waiting", "holding")
 
 
+class TestChoice(AsyncLeaf):
+    """Holds like TestHold; has a choice field and a float field (fields changed during a run)."""
+
+    fields = {"Mode": ["walk", "run"], "Speed": 1.0}
+
+
 class TestDetails(AsyncLeaf):
     """Sets its ``feedback`` detail to ``{"n": k}`` ``Count`` times, every ``Period`` seconds, then
     holds until halted."""
