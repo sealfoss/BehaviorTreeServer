@@ -1,0 +1,10 @@
+# Parameters of an executor (design 8.1). install.sh writes a copy for this machine.
+/**:
+  ros__parameters:
+    leaf_modules: ["bt_server_core.demo_leaves"]
+    log_keep_days: 30
+    max_tick_rate_hz: 200.0
+    status_rate_hz: 30.0
+    heartbeat_period_s: 0.5
+    blackboard_rate_hz: 10.0
+    # log_dir and journal_file default to ~/.ros/bt_server/<name>/...

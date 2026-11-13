@@ -190,8 +190,11 @@ are one piece of code.
    connections), not Svelte Flow.
 2. One session per executor, as designed. 3. No logins. 4. No undo. 5. Watchdog default 5 s.
 6. Two Parallel policies. 7. Sources only during a run. 8. The widget is not changed.
-9. JSON in typed envelopes, as designed. 10. The name `bt.<hostname>.local`, as designed, and
-   the gateway also answers to `<hostname>.local` and its address.
+9. JSON in typed envelopes, as designed. 10. Both names are published: `bt.<hostname>.local`
+   (the design's) and `bt-<hostname>.local`, because Windows 11 does not resolve the three-part
+   name (checked, `docs/VERIFIED.md`). The gateway's default `public_names` is
+   `["bt.{hostname}.local", "bt-{hostname}.local", "{hostname}.local"]`; it also answers to
+   its address.
 
 ## 5. The browser protocol (design 10)
 

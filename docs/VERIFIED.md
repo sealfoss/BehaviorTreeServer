@@ -12,4 +12,5 @@ Checked on `MOTHER-BRAIN` (Ubuntu 26.04.1, ROS 2 Lyrical, rclpy from `ros-lyrica
 | `rclpy.init(signal_handler_options=SignalHandlerOptions.NO)` leaves SIGINT and SIGTERM to the program. | **Yes:** after it, Python's own `default_int_handler` is still installed for SIGINT. |
 | `~/execute` expands to the node's private name for an action server. | **Yes:** `/verify/bt_executor/execute`. |
 | `Client.remove_pending_request` exists (Call Service halting, 6.5). | **Yes.** |
-| `avahi-publish` is installed (package `avahi-utils`). | It was not; `avahi-utils` was installed. |
+| `avahi-publish` is installed (package `avahi-utils`). | It was not; `avahi-utils` was installed. `avahi-publish -a -R` publishes a second name for the host's address. |
+| Windows looks up a three-part `.local` name. | **No.** From a Windows 11 PC on the same LAN, `bt.mother-brain.local` (published with `avahi-publish -a -R`, and resolvable with `avahi-resolve` on the server) gives "DNS name does not exist", while the two-part `bt-mother-brain.local` resolves to the server's address. **Decision (open question 20.1 #10):** the server publishes both `bt.<hostname>.local` (the design's name; macOS, iOS) and `bt-<hostname>.local` (Windows, and Linux with Avahi's usual setup), and the gateway answers to both. |

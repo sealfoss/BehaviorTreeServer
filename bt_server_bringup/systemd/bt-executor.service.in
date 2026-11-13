@@ -1,0 +1,22 @@
+# Behavior Tree Server: the executor (design 14.2). Written by setup_system_service.sh from
+# bt_server_bringup/systemd/bt-executor.service.in.
+[Unit]
+Description=Behavior Tree Server: executor /@NAMESPACE@/bt_executor
+After=network-online.target
+Wants=network-online.target
+PartOf=bt-server.target
+
+[Service]
+User=@USER@
+StateDirectory=bt_server
+LogsDirectory=bt_server
+Environment=ROS_DOMAIN_ID=@DOMAIN@
+Environment=HOME=/var/lib/bt_server
+ExecStart=/bin/bash -c 'source @ROS_SETUP@ && source @PREFIX@/install/setup.bash && source @PREFIX@/venv/bin/activate && exec python -m bt_server_executor --ros-args -r __ns:=/@NAMESPACE@ -r __node:=bt_executor --params-file @CONF@/executor.yaml'
+KillSignal=SIGINT
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target bt-server.target

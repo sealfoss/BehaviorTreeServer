@@ -1,0 +1,22 @@
+# Behavior Tree Server: the gateway (design 14.2). Written by setup_system_service.sh from
+# bt_server_bringup/systemd/bt-gateway.service.in.
+[Unit]
+Description=Behavior Tree Server: gateway (http://bt.%l.local)
+After=network-online.target
+Wants=network-online.target
+PartOf=bt-server.target
+
+[Service]
+User=@USER@
+StateDirectory=bt_server
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Environment=ROS_DOMAIN_ID=@DOMAIN@
+Environment=HOME=/var/lib/bt_server
+ExecStart=/bin/bash -c 'source @ROS_SETUP@ && source @PREFIX@/install/setup.bash && source @PREFIX@/venv/bin/activate && exec python -m bt_server_gateway --config @CONF@/gateway.toml'
+KillSignal=SIGINT
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target bt-server.target

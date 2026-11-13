@@ -1,0 +1,9 @@
+# Settings of the gateway (design 9.1). install.sh writes a copy for this machine with its
+# LAN address, host name and folders filled in.
+link = "ros"
+http_host = "127.0.0.1"
+http_port = 8080
+public_names = ["bt.{hostname}.local", "bt-{hostname}.local", "{hostname}.local"]
+executors = ["/cell1/bt_executor"]
+allowed_networks = []
+trees_dir = "~/bt_trees"

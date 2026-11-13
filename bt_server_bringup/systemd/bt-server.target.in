@@ -1,0 +1,8 @@
+# The Behavior Tree Server as one unit: the executor, the gateway and the published name.
+#   systemctl status bt-server.target      systemctl restart bt-server.target
+[Unit]
+Description=Behavior Tree Server (executor, gateway, bt.%l.local)
+Wants=bt-executor.service bt-gateway.service bt-server-name.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+#!/bin/bash
+# Publish mDNS address records for the gateway's names (design 14.3):
+#     bt-publish-name <name> [<name> ...]
+# The address is $BT_ADDRESS, or with BT_ADDRESS=auto (or unset) the source address of the
+# default route. -R leaves out the reverse entry, which allows more names for an address
+# that <hostname>.local already has. The records live as long as this script: if one
+# avahi-publish ends (Avahi restarted), the others are stopped too and the script exits with
+# an error, so systemd starts it again.
+set -u
+address="${BT_ADDRESS:-auto}"
+if [ "$address" = "auto" ]; then
+    address="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+fi
+if [ -z "$address" ]; then
+    echo "bt-publish-name: no LAN address found" >&2
+    exit 1
+fi
+if [ $# -eq 0 ]; then
+    echo "usage: bt-publish-name <name> [<name> ...]" >&2
+    exit 2
+fi
+pids=()
+for name in "$@"; do
+    /usr/bin/avahi-publish -a -R "$name" "$address" &
+    pids+=("$!")
+done
+trap 'kill "${pids[@]}" 2>/dev/null; exit 0' TERM INT
+wait -n
+kill "${pids[@]}" 2>/dev/null
+exit 1
