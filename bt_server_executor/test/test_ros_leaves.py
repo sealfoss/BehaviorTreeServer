@@ -126,6 +126,8 @@ def test_L_07_no_feedback(h):
     run = h.run(bundle(call_action(f"{h.ns}/{ACTION}", Feedback_Timeout=1.0)))
     h.finish(run)
     assert near(server.cancel_times()[0], 1.0)
+    assert near(run.sink.status_times(1, "C")[0], 1.0)
+    assert run.sink.status_times(1, "F")[0] >= server.ended[0][1] - 0.01
     assert run.sink.error_of(1) == "no feedback"
     assert run.result.outcome == Outcome.FAILED
 
@@ -272,19 +274,24 @@ except BaseException:
 
 
 def test_call_action_server_lost(h):
-    """6.5, Running: a server that exits is noticed by the check once a second."""
+    """6.5, Running: a server that exits is noticed by the check once a second; the node shows
+    Cancelling, and Failed "server lost" when the cancel nobody confirms has timed out."""
     proc = subprocess.Popen([sys.executable, "-c", SERVER_SCRIPT, f"{h.ns}/lost"])
     try:
         h.ready_action(f"{h.ns}/lost")
-        run = h.run(bundle(call_action(f"{h.ns}/lost")))
+        config = {"cancel_timeout_ms": 1000, "on_unconfirmed_cancel": "continue"}
+        run = h.run(bundle(call_action(f"{h.ns}/lost"), config=config))
         h.spin_for(0.5)
         assert run.sink.letters() == "R R"
         proc.send_signal(signal.SIGINT)
         proc.wait(timeout=10)
         exited = h.now()
         h.finish(run, 10.0)
+        cancelling = run.sink.status_times(1, "C")[0]
+        assert cancelling - exited <= 2.5
+        assert near(run.sink.status_times(1, "F")[0], cancelling + 1.0)
         assert run.sink.error_of(1) == "server lost"
-        assert run.sink.status_times(1, "F")[0] - exited <= 2.5
+        assert run.result.unconfirmed_cancels == 1
     finally:
         if proc.poll() is None:
             proc.kill()

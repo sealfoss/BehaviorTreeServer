@@ -5,6 +5,8 @@ thread, which is also where rclpy delivers replies, feedback and results, and no
 Their fields are those of ``bt_server_core.node_types``; bound fields (``Goal.pose.pose``) are
 filled from the blackboard by the engine when the leaf starts, which also fails the node with
 the reason when a binding names a missing or stale entry, before anything is sent (L-14).
+Giving up while active (*Timeout*, *Feedback Timeout*, a lost server) goes through the engine's
+``cancel_and_fail``: the node shows Cancelling while the goal is cancelled, then Failed.
 
 **Type names** are checked by :mod:`.ros_types` before anything is imported (L-15). Goals,
 requests and messages are built with ``rosidl_runtime_py.set_message_fields`` after every key of
@@ -23,9 +25,9 @@ this and fails with the reason when it starts.
   after the leaf gave up on it, or after it was halted, is cancelled at once (L-04, L-08).
 * Running: each feedback message renews the liveness time; the node's ``feedback`` detail and
   its ``Feedback.`` outputs are updated at most 10 times a second (the latest message is never
-  dropped). Once a second the leaf checks that the server is still on the network ("server
-  lost"). *Feedback Timeout* (ROS clock) sends a cancel and fails the node "no feedback" when
-  the goal is over, or after the tree's cancel timeout if it does not end.
+  dropped). Once a second the leaf checks that the server is still on the network. *Feedback
+  Timeout* (ROS clock) gives up with "no feedback", a server gone from the network with "server
+  lost" (its cancel is then confirmed by nobody: it times out, and the journal keeps sending it).
 * Result: succeeded -> the ``Result.`` outputs are written and the node succeeds; aborted ->
   "aborted"; cancelled without a halt -> "cancelled by the server".
 * Halted: a cancel is sent (once the goal reply is there); the leaf settles when the result
@@ -49,9 +51,11 @@ bundle, Loop Execution off) as an ``ExecuteTree`` goal to *Executor*, with the r
 blackboard file whose bound entries hold this tree's current values, and names this executor's
 ``~/status`` and run id as the watchdog (*Watchdog* seconds; 0: none). Before sending it looks at
 the other executor's ``~/status``: a run there fails the node "executor busy" and sends nothing.
-A rejected goal: "the tree was refused". While it runs it behaves as Call Action does, and fails
-"executor lost" when that executor's ``~/status`` has been silent for 3 s (or its action server
-left the network). The ``remote_run`` detail names the remote run. When the remote run ends,
+A rejected goal: "the tree was refused". While it runs it behaves as Call Action does, but fails
+"executor lost" at once when that executor's ``~/status`` has been silent for 3 s (or its action
+server left the network), without waiting for a cancel nobody can confirm (M-07); the remote
+tree's watchdog stops it there. Bound values come from ``ctx.bound_values()``. The
+``remote_run`` detail names the remote run. When the remote run ends,
 succeeded or not, the ``outputs`` (remote entry -> local entry) are written from its final
 blackboard and the remote Root's result is the node's.
 
@@ -77,7 +81,7 @@ from bt_server_core.files import PathError, subtree_key
 from bt_server_core.leaves import AsyncLeaf, LeafContext, LeafFailure, get_path, split_path
 from bt_server_core.node_types import spec
 from bt_server_core.treelog import LogLevel
-from bt_server_core.values import decode_value, dumps_json, encode_value, infer_type, loads_json
+from bt_server_core.values import decode_value, dumps_json, encode_value, loads_json
 
 from bt_server_interfaces.action import ExecuteTree
 from bt_server_interfaces.msg import TreeStatus
@@ -266,7 +270,6 @@ class _Goal:
         self.handle: Any = None
         self.halted = False      # the leaf was halted: it settles when the goal is over
         self.gave_up = False     # no reply in time: a late acceptance is cancelled
-        self.failing: str | None = None  # the leaf fails with this once the cancelled goal is over
         self.reported = False    # the leaf has been told how this goal went
         self.cancel_sent = False
         self.reply_timer: Any = None
@@ -353,7 +356,7 @@ class _Goal:
 
     # ----------------------------------------------------------------- running
     def _check_liveness(self) -> None:
-        if self.state != "running" or self.halted or self.failing is not None:
+        if self.state != "running" or self.halted:
             return
         problem = self.liveness_problem()
         if problem is not None:
@@ -366,26 +369,28 @@ class _Goal:
         return None if self.client.server_is_ready() else self.LOST
 
     def lost(self, reason: str) -> None:
-        """The other side is gone: fail now; the journal takes the goal over."""
+        """The server is gone: the node shows Cancelling while a cancel is tried, then Failed with
+        ``reason`` (a gone server confirms nothing: the cancel times out and the journal keeps
+        sending it until the server is back and says the goal is over)."""
         self.ctx.log(LogLevel.WARNING, f"{self.action_name}: {reason}")
-        self.cancel()
-        self.fail(reason)
+        self.give_up(reason)
+
+    def give_up(self, reason: str) -> None:
+        """Cancel the goal; the node fails with ``reason`` once that is settled (design 6.5)."""
+        if self._current() and not self.halted:
+            self.leaf.cancel_and_fail(reason)  # the engine calls on_cancel: see halt()
 
     def _arm_feedback_timeout(self) -> None:
         when = self.last_feedback + self.feedback_timeout
         self.timers.at(when, self._on_feedback_timeout, ros=True)
 
     def _on_feedback_timeout(self) -> None:
-        if self.state != "running" or self.halted or self.failing is not None:
+        if self.state != "running" or self.halted:
             return
         if self.ctx.ros_now() < self.last_feedback + self.feedback_timeout:
             self._arm_feedback_timeout()  # feedback came meanwhile
             return
-        self.ctx.log(LogLevel.INFO, f"{self.action_name}: no feedback for {self.feedback_timeout:g} s: cancelling")
-        self.failing = "no feedback"
-        self.ctx.detail("error", "no feedback")
-        self.cancel()
-        self.timers.after(max(0.0, self.run.cancel_timeout_s), lambda: self.fail("no feedback"))
+        self.give_up("no feedback")
 
     def _on_feedback(self, message: Any) -> None:
         if self.state != "running" or self.halted or self.reported:
@@ -414,7 +419,8 @@ class _Goal:
 
     # ----------------------------------------------------------------- cancelling
     def halt(self) -> None:
-        """The leaf was halted (or its Timeout passed): cancel, settle when the goal is over."""
+        """The leaf was halted, or gives up (its Timeout, no feedback, a lost server): cancel,
+        settle when the goal is over."""
         self.halted = True
         if self.state == "waiting":
             self.timers.cancel_all()
@@ -454,8 +460,6 @@ class _Goal:
             return
         if self.halted:
             self.settle()
-        elif self.failing is not None:
-            self.fail(self.failing)
         elif not self.reported and self.leaf._goal is self:
             self.finished(response.status, response.result)
 
@@ -708,7 +712,7 @@ def _bundle(run: Any) -> dict:
     """The bundle of the run: ``run.bundle``, else the one of the executor node's current run.
     Raises LeafFailure."""
     bundle = getattr(run, "bundle", None)
-    if isinstance(bundle, dict):
+    if isinstance(bundle, dict) and bundle:  # RunContext.bundle is {} when the executor gave none
         return bundle
     text = getattr(getattr(run.node, "current_run", None), "bundle_json", None)
     try:
@@ -758,8 +762,15 @@ class _RemoteGoal(_Goal):
         heard = self.watcher.last_time if self.watcher.last_time is not None else time.monotonic()
         return heard + EXECUTOR_SILENCE_S
 
+    def lost(self, reason: str) -> None:
+        """The other executor is gone: fail now (M-07: within 3 s of its last heartbeat). Its own
+        watchdog stops the remote tree; the journal keeps sending the cancel until it is back."""
+        self.ctx.log(LogLevel.WARNING, f"{self.executor}: {reason}")
+        self.cancel()
+        self.fail(reason)
+
     def _check_silence(self) -> None:
-        if self.state != "running" or self.halted or self.failing is not None:
+        if self.state != "running" or self.halted:
             return
         if time.monotonic() >= self._silence_deadline():
             self.lost(self.LOST)
@@ -841,16 +852,15 @@ class RemoteSubTreeLeaf(_ActionLeafBase):
 
     @staticmethod
     def _remote_blackboard(ctx: LeafContext, bundle: dict, key: str) -> list[dict]:
-        """The remote tree's blackboard file, its bound entries holding this tree's values. The
-        engine puts a bound entry's value into the fields under the remote entry's name."""
+        """The remote tree's blackboard file, its bound entries (remote name -> local name)
+        holding this tree's current values. Raises LeafFailure for a missing or stale entry."""
         entries = [dict(entry) for entry in bundle.get("blackboards", {}).get(key, ()) if isinstance(entry, dict)]
-        declared = set(RemoteSubTreeLeaf.fields)
-        for name, value in ctx.fields.items():
-            if name in declared:
-                continue
-            entry = next((item for item in entries if item.get("name") == name), None)
+        values = ctx.bound_values()
+        for remote_name, local_name in ctx.bindings.items():
+            value = encode_value(values[remote_name])
+            entry = next((item for item in entries if item.get("name") == remote_name), None)
             if entry is None:
-                entries.append({"name": name, "type": infer_type(value), "value": encode_value(value)})
+                entries.append({"name": remote_name, "type": ctx.blackboard.type_of(local_name), "value": value})
             else:
-                entry["value"] = encode_value(value)
+                entry["value"] = value
         return entries
