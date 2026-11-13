@@ -1,6 +1,6 @@
 """M-09 (Appendix B.10): Zoom In on a Remote Sub-Tree node during the run shows the remote tree
 with its live statuses, read-only. Two executor processes (``/m09a``, ``/m09b``) and a gateway
-with ``link = "ros"``, on ROS_DOMAIN_ID 51, discovery limited to this machine."""
+with ``link = "ros"``, on the environment's ROS_DOMAIN_ID (51 if unset), discovery limited to this machine."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ pytestmark = [pytest.mark.page, pytest.mark.ros, pytest.mark.slow]
 pytest.importorskip("rclpy")
 pytest.importorskip("bt_server_interfaces.action")
 
-DOMAIN_ID = "51"
+DOMAIN_ID = os.environ.get("ROS_DOMAIN_ID") or "51"  # the environment's domain; 51 when none is set
 LOCAL = "/m09a/bt_executor"
 REMOTE = "/m09b/bt_executor"
 

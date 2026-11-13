@@ -5,7 +5,7 @@
   ``MultiThreadedExecutor`` starves the other threads of this process on Lyrical: a 2 s
   ``time.sleep`` took 8 s next to it, and messages arrived seconds late.)
 * :class:`ExecutorProcess`: an executor started as ``python -m bt_server_executor`` with a
-  parameters file of its own, in a namespace of its own, on ``ROS_DOMAIN_ID`` 41.
+  parameters file of its own, in a namespace of its own, on the environment's ``ROS_DOMAIN_ID`` (41 if unset).
 * :class:`FibServer`: a scripted ``example_interfaces/action/Fibonacci`` server that accepts
   goals, runs until cancelled (or finishes after ``finish_after`` seconds) and records goals and
   cancel requests with their times.
@@ -44,7 +44,9 @@ from bt_server_interfaces.action import ExecuteTree
 
 TEST_DIR = Path(__file__).resolve().parent
 REPO = TEST_DIR.parents[1]
-DOMAIN_ID = "41"
+# The environment's domain, so that executors started here and the clients of the test process
+# (RosLink, ros_helpers) meet; 41 when none is set.
+DOMAIN_ID = os.environ.get("ROS_DOMAIN_ID") or "41"
 _counter = itertools.count(1)
 
 
