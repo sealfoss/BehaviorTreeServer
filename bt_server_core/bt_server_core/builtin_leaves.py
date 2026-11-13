@@ -61,6 +61,7 @@ class EvaluationLeaf(InstantLeaf):
     def on_start(self, ctx: LeafContext) -> None:
         self._wait_start: float | None = None
         self._timer: Any = None
+        self._timed_out = False
         self._waiting_shown = False
 
     def tick(self, ctx: LeafContext) -> Any:
@@ -123,8 +124,8 @@ class EvaluationLeaf(InstantLeaf):
         if self._wait_start is None:
             self._wait_start = now
             if timeout > 0:
-                self._timer = ctx.scheduler.call_at(now + timeout, ctx.request_tick, ros=True)
-        elif timeout > 0 and now >= self._wait_start + timeout:
+                self._timer = ctx.scheduler.call_at(now + timeout, self._on_timeout, ros=True)
+        elif timeout > 0 and (self._timed_out or now >= self._wait_start + timeout):
             self._stop_waiting(ctx)
             raise LeafFailure("timed out")
         other_name = _entry_name(ctx, "CompareTo")
@@ -144,10 +145,17 @@ class EvaluationLeaf(InstantLeaf):
                 return convert_literal(literal, type_name)
         return literal
 
+    def _on_timeout(self) -> None:
+        """The wait timer fired: the next tick fails the node (no float comparison to miss)."""
+        self._timer = None
+        self._timed_out = True
+        self.ctx.request_tick()
+
     def _stop_waiting(self, ctx: LeafContext) -> None:
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
+        self._timed_out = False
         self._wait_start = None
         if self._waiting_shown:
             ctx.detail("waiting", None)

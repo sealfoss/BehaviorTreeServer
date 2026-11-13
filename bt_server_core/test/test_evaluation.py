@@ -218,3 +218,17 @@ def test_entry_going_stale_requests_a_tick() -> None:
     run.at(0.5)
     assert run.calls["n"] == [0, 0.5]
     assert "no recent data" in run.details("W")["waiting"]
+
+
+def test_evaluation_timeout_acts_on_time_with_a_ros_clock_offset() -> None:
+    late = []
+    for offset in (0.1, 1e9 + 0.7, 1.7e9 + 0.123):
+        for timeout in (0.1, 0.3, 0.7, 1.1, 2.3, 5.0):
+            run = EngineRun("Seq[W, s]", options={"W": {"fields": {"WaitTimeout": timeout}}})
+            run.scheduler.ros_offset = offset
+            run.scheduler.advance_to(0.25)
+            run.start()
+            run.at(0.25 + timeout + 1e-12)
+            if run.codes() != "F F -":
+                late.append((offset, timeout, run.codes()))
+    assert late == []

@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import itertools
+import math
 import threading
 import time
 from collections import deque
@@ -56,11 +57,12 @@ class Scheduler(Protocol):
 
 
 class _FakeTimer:
-    __slots__ = ("cancelled", "fn", "when")
+    __slots__ = ("cancelled", "fn", "ros_when", "when")
 
-    def __init__(self, when: float, fn: Callable[[], None]) -> None:
+    def __init__(self, when: float, fn: Callable[[], None], ros_when: float | None = None) -> None:
         self.when = when
         self.fn = fn
+        self.ros_when = ros_when  # the time asked for on the ROS clock
         self.cancelled = False
 
     def cancel(self) -> None:
@@ -101,9 +103,10 @@ class FakeScheduler:
             self._wake.notify_all()
 
     def call_at(self, when: float, fn: Callable[[], None], ros: bool = False) -> Cancelable:
+        ros_when = float(when) if ros else None
         if ros:
             when -= self.ros_offset
-        timer = _FakeTimer(float(when), fn)
+        timer = _FakeTimer(float(when), fn, ros_when)
         heapq.heappush(self._timers, (timer.when, next(self._order), timer))
         return timer
 
@@ -129,7 +132,7 @@ class FakeScheduler:
             timer = self._next_timer(when)
             if timer is None:
                 break
-            self._now = max(self._now, timer.when)
+            self._now = max(self._now, min(timer.when, float(when)))
             timer.fn()
             self.run_pending()
         self._now = max(self._now, float(when))
@@ -141,11 +144,19 @@ class FakeScheduler:
             if timer.cancelled:
                 heapq.heappop(self._timers)
                 continue
-            if when > until + self.EPSILON:
+            if when > until + self.EPSILON and not self._ros_due(timer, until):
                 return None
             heapq.heappop(self._timers)
             return timer
         return None
+
+    def _ros_due(self, timer: _FakeTimer, until: float) -> bool:
+        """A ROS-clock timer is due when its ROS time is reached; compared on the ROS clock, so a
+        large clock offset (sim time near the epoch) does not shift it by a rounding error."""
+        if timer.ros_when is None:
+            return False
+        target = until + self.ros_offset
+        return timer.ros_when <= target + self.EPSILON + 4 * math.ulp(target)
 
     def wait_for(self, predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
         """Run :meth:`call_soon` callbacks (from worker threads) as they arrive until

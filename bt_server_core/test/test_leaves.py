@@ -435,3 +435,56 @@ def test_commands_from_a_worker_thread() -> None:
     wait(run, lambda: run.result is not None)
     assert run.result.outcome == Outcome.STOPPED
     assert run.state == State.IDLE
+
+
+# ------------------------------------------------------------------------- regressions (review)
+
+
+def test_widget_set_field_reads_back_at_once() -> None:
+    seen = []
+
+    class Counter(LeafNodeWidget):
+        _fields = {"count": 0}
+
+        def OnRun(self, tree: Any) -> Any:  # noqa: N802
+            self.SetField("count", self.GetField("count") + 1)
+            self.SetField("count", self.GetField("count") + 1)
+            self.SetFieldSelectionIndex("mode", 1)
+            seen.append((self.GetField("count"), self.GetFieldSelection("mode")))
+            return True
+
+    Counter._fields = {"count": 0, "mode": ["a", "b"]}
+    run = EngineRun("Seq[K]", leaves={"K": {"type": "Counter"}}, registry=registry(Counter)).start()
+    wait(run, lambda: run.result is not None)
+    assert seen == [(2, "b")]
+    node = run.runner.node(run.index("K"))
+    assert node.fields["count"] == 2
+    reported = [value["value"] for _, _, kind, value in run.sink.detail_history if kind == "field"]
+    assert reported == [1, 2]
+
+
+def test_thread_call_from_an_earlier_run_ticks_the_new_run() -> None:
+    calls: list[float] = []
+
+    class Slowpoke(ThreadLeaf):
+        def run(self, ctx: LeafContext) -> Any:
+            calls.append(ctx.now())
+            GATE.wait(10)
+            return True
+
+    reg = registry(Slowpoke)
+    first = EngineRun("Seq[T]", registry=reg, leaves={"T": {"type": "Slowpoke"}}, config={"cancel_timeout_ms": 500})
+    first.start()
+    wait(first, lambda: len(calls) == 1)
+    first.at(0.5)
+    first.runner.stop()
+    first.at(1.5)
+    assert first.result.unconfirmed_cancels == 1
+    second = EngineRun("Seq[T]", registry=reg, leaves={"T": {"type": "Slowpoke"}})
+    second.scheduler.advance_to(1.5)
+    second.start()
+    assert second.codes() == "R R"
+    assert "previous call" in second.details("T")["waiting"]
+    GATE.set()
+    wait(second, lambda: len(calls) == 2)  # started when the old call returned, not at the next periodic tick
+    assert calls[1] == 1.5

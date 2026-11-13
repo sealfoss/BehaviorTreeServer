@@ -235,6 +235,7 @@ class TreeRunner:
         self._stop_message = "Stopped"
         self._stopped_by_command = False
         self._error: str | None = None
+        self._halting = 0
         self._snapshot: BlackboardSnapshot | None = None
         self._tick_requested = False
         self._last_event_tick = float("-inf")
@@ -487,15 +488,27 @@ class TreeRunner:
         self._tick(periodic=False)
 
     def _schedule_periodic(self) -> None:
+        """Arm the next periodic tick on the rhythm from the start of the run; periods already
+        past (a slow tick, a loaded host) are skipped, not caught up in a burst."""
+        interval = self.config["tick_interval_ms"] / 1000.0
+        now = self.scheduler.now()
         self._periodic_count += 1
-        when = self._periodic_base + self._periodic_count * self.config["tick_interval_ms"] / 1000.0
+        while self._periodic_base + self._periodic_count * interval <= now:
+            self._periodic_count += 1
+        when = self._periodic_base + self._periodic_count * interval
         self._periodic_handle = self.scheduler.call_at(when, self.entry_point(self._on_periodic))
 
     def _on_periodic(self) -> None:
         self._periodic_handle = None
         if self._finished:
             return
-        self._schedule_periodic()
+        try:
+            self._periodic_tick()
+        finally:
+            if not self._finished and self._periodic_handle is None:
+                self._schedule_periodic()
+
+    def _periodic_tick(self) -> None:
         if self.state == State.RESTARTING and self._new_loop is not None and not self.cancelling_leaves:
             self._begin_loop()
             if self._pause_after_restart:
@@ -526,6 +539,8 @@ class TreeRunner:
         except Exception as error:  # noqa: BLE001 - the tick itself failed (design 5.7)
             self.ticking = False
             self.aborting = False
+            self._deferred = []
+            self._commit(start=False)  # the cancels of the leaves halted before the failure
             self._tick_failed(error)
             return
         finally:
@@ -607,15 +622,31 @@ class TreeRunner:
             self.blackboard.end_loop()
 
     def progress(self) -> None:
-        """Move the run on once the cancels it waits for are done."""
-        if self._finished or self.cancelling_leaves:
+        """Move the run on once the cancels it waits for are done. Not while the tree is being
+        halted: a leaf that settles at once must not end a Stop or Reset before every other leaf
+        was halted. A loop ends only while RUNNING: during a pause only the tree's progress waits."""
+        if self._finished or self.cancelling_leaves or self._halting:
             return
         if self.state == State.STOPPING:
             self._finish_stop()
         elif self._restart_pending:
             self._finish_restart()
-        elif self.state in (State.RUNNING, State.PAUSED) and self._loop_active and self._root_result is not None:
+        elif self.state == State.RUNNING and self._loop_active and self._root_result is not None:
             self._end_loop()
+        elif (self.state == State.RUNNING and not self._loop_active and self._new_loop == "periodic"
+              and not self.config["repeat"] and self._root_result is not None):
+            result = self._root_result  # Loop Execution was switched off between two loops
+            self.log(LogLevel.INFO, f"Execution finished: {result.text}")
+            self._finish(Outcome.SUCCEEDED if result == Status.SUCCEEDED else Outcome.FAILED, result.text)
+
+    def _halt_all(self) -> None:
+        """Halt the whole tree (outside a tick), then move the run on once."""
+        self._halting += 1
+        try:
+            self._root.halt()
+        finally:
+            self._halting -= 1
+        self.progress()
 
     def _end_loop(self) -> None:
         result = self._root_result
@@ -683,8 +714,7 @@ class TreeRunner:
         self._started = True
         with self._entry():
             self.log(LogLevel.INFO, "Execution started")
-            if self.config["restore_blackboard"]:
-                self._snapshot = self.blackboard.snapshot()
+            self._snapshot = self.blackboard.snapshot()  # the option may be switched on later
             self._set_state(State.RUNNING)
             self._periodic_base = self.scheduler.now()
             self._periodic_count = 0
@@ -719,6 +749,7 @@ class TreeRunner:
                 self._set_state(State.RESTARTING)  # the Reset made while paused still waits for cancels
                 return
             self._set_state(State.RUNNING)
+            self.progress()  # a loop whose last cancel was confirmed during the pause ends now
             self.request_tick()
 
     def stop(self) -> None:
@@ -744,8 +775,7 @@ class TreeRunner:
                 self._set_state(State.RESTARTING)
             self._restart_pending = True
             self._new_loop = None
-            self._root.halt()
-            self.progress()
+            self._halt_all()
 
     def _stop(self, by_command: bool, outcome: Outcome = Outcome.STOPPED, message: str = "Stopped") -> None:
         if self.ticking:
@@ -760,8 +790,7 @@ class TreeRunner:
         self._restart_pending = False
         self._new_loop = None
         self._set_state(State.STOPPING)
-        self._root.halt()
-        self.progress()
+        self._halt_all()
 
     def _defer(self, name: str) -> None:
         """A command issued during the tick: the tick ends at once and it is carried out after."""
@@ -845,9 +874,10 @@ class TreeRunner:
                     new = set_path(node.fields.get(name), split_path(path), value)
                 except (KeyError, IndexError, TypeError, ValueError) as error:
                     raise OpError(f"{name}.{path}: {error}") from error
-            node.fields[name] = copy.deepcopy(new)
-            if not any(key.split(".")[0].split("[")[0] == name for key in node.bindings):
-                node.values[name] = copy.deepcopy(new)
+            with node.lock:
+                node.fields[name] = copy.deepcopy(new)
+                if not any(key.split(".")[0].split("[")[0] == name for key in node.bindings):
+                    node.values = {**node.values, name: copy.deepcopy(new)}
 
     def _apply_config(self, config: Any) -> None:
         if not isinstance(config, dict):
@@ -859,11 +889,7 @@ class TreeRunner:
             self._periodic_base = self.scheduler.now()
             self._periodic_count = 0
             self._schedule_periodic()
-        if not self.config["repeat"] and self._new_loop == "periodic" and not self._loop_active \
-                and self.state in (State.RUNNING, State.PAUSED) and self._root_result is not None:
-            result = self._root_result
-            self.log(LogLevel.INFO, f"Execution finished: {result.text}")
-            self._finish(Outcome.SUCCEEDED if result == Status.SUCCEEDED else Outcome.FAILED, result.text)
+        self.progress()
 
     # ----------------------------------------------------------------- the blackboard
     def _on_blackboard_change(self) -> None:

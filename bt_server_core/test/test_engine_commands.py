@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import pytest
-from engine_helpers import EngineRun, Script
+from engine_helpers import EngineRun, Script, make_registry
 
 from bt_server_core.blackboard import Blackboard
-from bt_server_core.engine import BundleError, CommandRefused, Outcome, State, TreeRunner
+from bt_server_core.compat import LeafNodeWidget
+from bt_server_core.engine import BundleError, CommandRefused, Outcome, State, Status, TreeRunner
+from bt_server_core.leaves import AsyncLeaf
 from bt_server_core.registry import Registry
 from bt_server_core.scheduler import FakeScheduler
 
@@ -289,3 +291,134 @@ def test_apply_set_field_and_tick_interval_during_a_run() -> None:
     assert run2.calls["n"] == [0, 0.25, 0.5]
     with pytest.raises(Exception, match="cannot be applied"):
         run2.runner.apply([{"op": "node.add"}])
+
+
+# ------------------------------------------------------------------------- regressions (review)
+
+
+class Quick(AsyncLeaf):
+    """A started leaf whose cancel is confirmed at once (AsyncLeaf's default on_cancel)."""
+
+    TYPE_NAME = "Quick"
+
+
+def quick_registry() -> Registry:
+    registry = make_registry()
+    registry.register(Quick)
+    return registry
+
+
+def test_pause_node_keeps_memory_position() -> None:
+    run = EngineRun("Seq[n, Pause, s]").start()
+    run.at(2.4)
+    run.runner.resume()
+    run.at(2.4)
+    assert run.calls["n"] == [0]
+    assert run.result.outcome == Outcome.SUCCEEDED
+    run = EngineRun("Seq[A, Pause, s]", scripts={"A": Script("S", 0.5)}).start()
+    run.at(1)
+    assert (run.state, run.codes()) == (State.PAUSED, "R S R -")
+    run.runner.resume()
+    run.at(1.6)
+    assert run.codes() == "S S S S"
+    assert run.events_of("A") == [(0, "goal")]
+
+
+def test_stop_waits_for_every_cancel_after_a_synchronous_settle() -> None:
+    run = EngineRun("Seq[All[Q, B]]", registry=quick_registry(), leaves={"Q": {"type": "Quick"}},
+                    scripts={"B": Script(cancel_after=None)}).start()
+    run.at(0.5)
+    run.runner.stop()
+    assert (run.state, run.codes()) == (State.STOPPING, "- - - C")
+    assert run.result is None
+    run.at(5.5)
+    assert run.state == State.IDLE
+    assert run.result.outcome == Outcome.STOPPED and run.result.unconfirmed_cancels == 1
+
+
+@pytest.mark.parametrize("paused", [False, True])
+def test_reset_waits_for_every_cancel_after_a_synchronous_settle(paused: bool) -> None:
+    run = EngineRun("Seq[S9, All[Q, B]]", registry=quick_registry(), config={"restore_blackboard": True},
+                    entries=[{"name": "m", "type": "Integer", "value": 1}], scripts={"B": Script(cancel_after=2.0)},
+                    leaves={"Q": {"type": "Quick"}, "S9": {"type": "Set", "fields": {
+                        "ValueName": "m", "CompareTo": None, "LiteralValue": 9}}}).start()
+    run.at(0.5)
+    if paused:
+        run.runner.pause()
+    run.runner.reset()
+    assert run.codes() == "- - - - C"
+    assert run.blackboard.get("m") == 9  # restored only once every cancel is confirmed
+    run.at(2.5)
+    assert run.blackboard.get("m") == 1
+    assert run.state == (State.PAUSED if paused else State.RESTARTING)
+
+
+def test_tick_failure_sends_the_queued_cancels() -> None:
+    run = EngineRun("Seq[Sel~[c, A], s]").start()
+    run.at(0.5)
+    failing = run.runner.node(run.index("s"))
+
+    def broken() -> None:
+        raise RuntimeError("engine bug")
+
+    failing.tick = broken  # type: ignore[method-assign]
+    run.set("go", True)
+    assert run.events_of("A") == [(0, "goal"), (0.5, "cancel")]
+    assert run.state == State.STOPPING
+    run.at(0.7)
+    assert run.state == State.IDLE and run.result.outcome == Outcome.ERROR
+
+
+def test_restore_switched_on_during_the_run() -> None:
+    run = EngineRun("Seq[S9, A]", entries=[{"name": "m", "type": "Integer", "value": 1}],
+                    leaves={"S9": {"type": "Set", "fields": {"ValueName": "m", "CompareTo": None,
+                                                             "LiteralValue": 9}}}).start()
+    run.runner.apply([{"op": "doc.set_config", "config": {"restore_blackboard": True}}])
+    run.at(0.5)
+    run.runner.stop()
+    run.at(1)
+    assert run.blackboard.get("m") == 1
+
+
+def test_run_does_not_end_while_paused() -> None:
+    run = EngineRun("Seq~[c, A]", entries=[{"name": "go", "type": "Bool", "value": True}]).start()
+    run.at(2.3)
+    run.set("go", False)
+    run.at(2.4)
+    run.runner.pause()
+    run.at(2.5)
+    assert (run.state, run.codes()) == (State.PAUSED, "F F -")
+    assert run.result is None
+    run.at(3)
+    run.runner.resume()
+    assert run.state == State.IDLE and run.result.outcome == Outcome.FAILED
+
+
+def test_loop_execution_switched_off_while_paused_between_loops() -> None:
+    run = EngineRun("Seq[s]", config={"repeat": True}).start()
+    run.runner.pause()
+    run.runner.apply([{"op": "doc.set_config", "config": {"repeat": False}}])
+    assert run.result is None
+    run.runner.resume()
+    assert run.state == State.IDLE and run.result.outcome == Outcome.SUCCEEDED
+
+
+def test_periodic_tick_skips_missed_periods() -> None:
+    times: list[float] = []
+
+    class Slow(LeafNodeWidget):
+        TYPE_NAME = "Slow"
+        RUN_IN_THREAD = False
+
+        def OnRun(self, tree: object) -> object:  # noqa: N802
+            times.append(round(self.ctx.now(), 3))
+            if len(times) == 2:
+                self.ctx.scheduler._now += 1.0  # this call takes 1 s  # type: ignore[attr-defined]
+            return Status.RUNNING
+
+    registry = make_registry()
+    registry.register(Slow)
+    run = EngineRun("Seq[I]", registry=registry, leaves={"I": {"type": "Slow"}}, config={"tick_interval_ms": 100})
+    run.start()
+    run.at(1.5)
+    assert times == [0.0, 0.1, 1.2, 1.3, 1.4, 1.5]

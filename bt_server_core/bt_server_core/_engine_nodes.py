@@ -13,6 +13,7 @@ pass through Cancelling (:meth:`Node.halt`).
 from __future__ import annotations
 
 import copy
+import threading
 import traceback
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
@@ -131,6 +132,10 @@ class CompositeNode(Node):
         for position in range(start, len(self.children)):
             result = self.children[position].tick()
             if self.run.aborting:
+                # The tick ends here (a command from node code); with Memory the next tick resumes
+                # at this child, or after it when it already passed.
+                passed = result not in (RUNNING, stop_on)
+                self.current = position + 1 if passed else position
                 return self.finish(before, RUNNING)
             if result == RUNNING or result == stop_on:
                 self.current = position
@@ -165,10 +170,10 @@ class ParallelNode(Node):
             if self.results[position] is not None:
                 continue  # a finished child keeps its result
             result = child.tick()
-            if self.run.aborting:
-                return self.finish(before, RUNNING)
             if result != RUNNING:
                 self.results[position] = result
+            if self.run.aborting:
+                return self.finish(before, RUNNING)
         if FAILED in self.results:
             outcome = FAILED
         elif self.policy == "any" and SUCCEEDED in self.results:
@@ -236,6 +241,7 @@ class LeafNode(Node):
     def __init__(self, *args: Any, leaf_class: type[Leaf], fields: dict, selections: dict, bindings: dict,
                  outputs: dict) -> None:
         super().__init__(*args)
+        self.lock = threading.Lock()  # fields and values are changed from worker threads too
         self.leaf_class = leaf_class
         self.fields = fields
         self.values = copy.deepcopy(fields)
@@ -254,6 +260,7 @@ class LeafNode(Node):
         self.token: RunToken | None = None
         self.future: Future | None = None
         self.outstanding: Future | None = None  # an abandoned call that must return first
+        self.watched: Future | None = None  # a call of an earlier run this node waits for
         self.deadline: Any = None
         self.cancel_timer: Any = None
         self.cancel_generation = 0
@@ -279,28 +286,37 @@ class LeafNode(Node):
         return self.run.blackboard
 
     def field_values(self) -> dict:
-        return self.values
+        with self.lock:
+            return self.values
 
     def selection_index(self, name: str) -> int:
         index = self.selections.get(name, 0)
         return index if isinstance(index, int) and not isinstance(index, bool) else 0
 
     def set_selection(self, name: str, index: int) -> None:
-        self.selections[name] = index
+        """Select an option of a choice field, at once (any thread)."""
+        with self.lock:
+            self.selections[name] = index
 
     def set_field(self, name: str, value: Any) -> None:
-        self.fields[name] = value
-        self.values[name] = value
+        """Change a field at once (any thread), as the widget's ``SetField`` does; the ``field``
+        detail is reported on the engine thread."""
+        with self.lock:
+            self.fields[name] = value
+            self.values = {**self.values, name: value}
         try:
             encoded = encode_value(value)
         except TypeError:
             encoded = None
-        self.run.detail(self.index, "field", {"tree": self.tree_key, "id": self.node_id, "field": name,
-                                              "value": encoded})
+        detail = {"tree": self.tree_key, "id": self.node_id, "field": name, "value": encoded}
+        self.post(lambda: self.run.detail(self.index, "field", detail))
 
     def set_title(self, title: str) -> None:
-        self.title = title
-        self.run.detail(self.index, "title", {"tree": self.tree_key, "id": self.node_id, "title": title})
+        """Change the title at once (any thread); the ``title`` detail is reported on the engine thread."""
+        with self.lock:
+            self.title = title
+        detail = {"tree": self.tree_key, "id": self.node_id, "title": title}
+        self.post(lambda: self.run.detail(self.index, "title", detail))
 
     def post(self, fn: Any) -> None:
         self.run.post(fn)
@@ -368,7 +384,8 @@ class LeafNode(Node):
                 values = set_path(values, parts, value)
             except (KeyError, IndexError, TypeError) as error:
                 return f"the binding of {path} cannot be applied: {error}"
-        self.values = values
+        with self.lock:
+            self.values = values
         return None
 
     def _tick_instant(self) -> Status:
@@ -450,11 +467,18 @@ class LeafNode(Node):
 
     # ----------------------------------------------------------------- starting (after the tick)
     def blocked_by_own_call(self) -> bool:
-        """True while a call of this node (or of its node in an earlier run) has not returned."""
+        """True while a call of this node (or of its node in an earlier run) has not returned.
+        A call left from an earlier run requests a tick of this run when it returns."""
         if self.outstanding is not None and not self.outstanding.done():
             return True
         earlier = self.run.registry.outstanding_calls.get(self.path)
-        return earlier is not None and earlier is not self.future and not earlier.done()
+        if earlier is None or earlier is self.future or earlier.done():
+            return False
+        if self.watched is not earlier:
+            self.watched = earlier
+            tick = self.run.entry_point(self.run.request_tick)
+            earlier.add_done_callback(lambda _call: self.run.scheduler.call_soon(tick))
+        return True
 
     def start(self) -> None:
         """The leaf may start: take the bound values and start its work."""

@@ -362,14 +362,15 @@ class LeafContext:
         return options[min(max(index, 0), len(options) - 1)]
 
     def set_field(self, name: str, value: Any) -> None:
-        """Change a field of the node; it goes out as a ``field`` detail."""
+        """Change a field of the node at once (a read right after sees it); it goes out as a
+        ``field`` detail."""
         check_not_cancelled("set_field")
-        self._host.post(lambda: self._host.set_field(name, value))
+        self._host.set_field(name, value)
 
     def set_title(self, title: str) -> None:
         """Change the node's title; it goes out as a ``title`` detail."""
         check_not_cancelled("set_title")
-        self._host.post(lambda: self._host.set_title(str(title)))
+        self._host.set_title(str(title))
 
     # ----------------------------------------------------------------- outputs
     @property

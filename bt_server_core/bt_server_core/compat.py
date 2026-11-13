@@ -221,8 +221,7 @@ class LeafNodeWidget(Leaf):
             raise TypeError(f"field {key!r} is not a list")
         if not 0 <= index < len(options):
             raise IndexError(f"index {index} out of range for field {key!r}")
-        host = self.ctx._host
-        host.post(lambda: host.set_selection(key, index))
+        self.ctx._host.set_selection(key, index)
 
     def CancelRequested(self) -> bool:  # noqa: N802
         return self.ctx.cancel_requested()
