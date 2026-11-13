@@ -1,0 +1,180 @@
+{
+  "format": "behavior_tree_widget",
+  "version": 2,
+  "config": {
+    "tick_interval_ms": 100,
+    "repeat": false,
+    "restore_blackboard": false,
+    "default_memory": true
+  },
+  "view": {
+    "zoom": 1.0,
+    "center": [
+      0.0,
+      200.0
+    ]
+  },
+  "nodes": [
+    {
+      "id": "4d38289a654c45a491c1af9ec3f386b2",
+      "type": "Root",
+      "title": "Root",
+      "x": 0.0,
+      "y": 0.0,
+      "composite": "Sequence",
+      "memory": true
+    },
+    {
+      "id": "c444264ff0a941a68b2ca8a17276eaff",
+      "type": "LogMessage",
+      "title": "Start",
+      "x": -900.0,
+      "y": 200.0,
+      "fields": {
+        "message": "Demo started",
+        "level": [
+          "INFO",
+          "WARNING",
+          "ERROR"
+        ]
+      },
+      "field_selections": {
+        "level": 0
+      }
+    },
+    {
+      "id": "d26ae15ebecc400ab9c678a13ba38c97",
+      "type": "Parallel",
+      "title": "Charge and Count",
+      "x": -450.0,
+      "y": 200.0,
+      "policy": "all"
+    },
+    {
+      "id": "4bfde02646f349bf8afd2fc463b02427",
+      "type": "Sequence",
+      "title": "Charging",
+      "x": -650.0,
+      "y": 400.0,
+      "memory": true
+    },
+    {
+      "id": "1b74ddeb6191419998a2574600a1a54f",
+      "type": "Wait",
+      "title": "Charge",
+      "x": -800.0,
+      "y": 600.0,
+      "fields": {
+        "seconds": 2.0
+      }
+    },
+    {
+      "id": "2e3c4bd0ee734f43865050e99abd2d9b",
+      "type": "Set",
+      "title": "Battery Full",
+      "x": -500.0,
+      "y": 600.0,
+      "fields": {
+        "ValueName": "battery",
+        "CompareTo": null,
+        "LiteralValue": 100.0
+      }
+    },
+    {
+      "id": "7adf70d5afb54c41885daa34edc7a487",
+      "type": "IncrementCounter",
+      "title": "Increment Counter",
+      "x": -250.0,
+      "y": 400.0,
+      "fields": {
+        "entry": "counter",
+        "step": 1
+      }
+    },
+    {
+      "id": "e732b771cf924b9ab8f90218db769373",
+      "type": "Evaluation",
+      "title": "Battery Charged?",
+      "x": 150.0,
+      "y": 200.0,
+      "fields": {
+        "ValueName": "battery",
+        "CompareTo": null,
+        "LiteralValue": 90.0,
+        "Operator": ">=",
+        "Wait": true,
+        "WaitTimeout": 10.0
+      }
+    },
+    {
+      "id": "694e06f36a3c487abfbd5ddbeb3dd160",
+      "type": "Sub-Tree",
+      "title": "patrol",
+      "x": 450.0,
+      "y": 200.0,
+      "fields": {
+        "File": "patrol_BT.json"
+      }
+    },
+    {
+      "id": "ce91780213c64b5eaf1e43116a0ef46b",
+      "type": "Print Message",
+      "title": "Print Counter",
+      "x": 750.0,
+      "y": 200.0,
+      "fields": {
+        "Level": 4,
+        "Source": "counter",
+        "Message": ""
+      }
+    },
+    {
+      "id": "e0de44e63e8b49ee894a2a9154114129",
+      "type": "Notes",
+      "title": "Notes",
+      "x": -900.0,
+      "y": -150.0,
+      "text": "New in the server: a Parallel (both branches at once), an Evaluation that waits until battery >= 90, and a Sub-Tree.",
+      "width": 380,
+      "height": 110
+    }
+  ],
+  "connections": [
+    {
+      "parent": "4d38289a654c45a491c1af9ec3f386b2",
+      "child": "c444264ff0a941a68b2ca8a17276eaff"
+    },
+    {
+      "parent": "4d38289a654c45a491c1af9ec3f386b2",
+      "child": "d26ae15ebecc400ab9c678a13ba38c97"
+    },
+    {
+      "parent": "4d38289a654c45a491c1af9ec3f386b2",
+      "child": "e732b771cf924b9ab8f90218db769373"
+    },
+    {
+      "parent": "4d38289a654c45a491c1af9ec3f386b2",
+      "child": "694e06f36a3c487abfbd5ddbeb3dd160"
+    },
+    {
+      "parent": "4d38289a654c45a491c1af9ec3f386b2",
+      "child": "ce91780213c64b5eaf1e43116a0ef46b"
+    },
+    {
+      "parent": "d26ae15ebecc400ab9c678a13ba38c97",
+      "child": "4bfde02646f349bf8afd2fc463b02427"
+    },
+    {
+      "parent": "d26ae15ebecc400ab9c678a13ba38c97",
+      "child": "7adf70d5afb54c41885daa34edc7a487"
+    },
+    {
+      "parent": "4bfde02646f349bf8afd2fc463b02427",
+      "child": "1b74ddeb6191419998a2574600a1a54f"
+    },
+    {
+      "parent": "4bfde02646f349bf8afd2fc463b02427",
+      "child": "2e3c4bd0ee734f43865050e99abd2d9b"
+    }
+  ]
+}

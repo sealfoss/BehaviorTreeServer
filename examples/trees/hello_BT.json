@@ -1,0 +1,107 @@
+{
+  "format": "behavior_tree_widget",
+  "version": 1,
+  "config": {
+    "tick_interval_ms": 100,
+    "repeat": false,
+    "restore_blackboard": false,
+    "default_memory": true
+  },
+  "view": {
+    "zoom": 1.0,
+    "center": [
+      0.0,
+      200.0
+    ]
+  },
+  "nodes": [
+    {
+      "id": "e769fd4938154994b915d80e8742ed8a",
+      "type": "Root",
+      "title": "Root",
+      "x": 0.0,
+      "y": 0.0,
+      "composite": "Sequence",
+      "memory": true
+    },
+    {
+      "id": "bd42f5b100c54a0b998309068efa40d0",
+      "type": "LogMessage",
+      "title": "Say Hello",
+      "x": -450.0,
+      "y": 200.0,
+      "fields": {
+        "message": "Hello from the Behavior Tree Server!",
+        "level": [
+          "INFO",
+          "WARNING",
+          "ERROR"
+        ]
+      },
+      "field_selections": {
+        "level": 0
+      }
+    },
+    {
+      "id": "05ffd6e0aa7b416b81ba9239daa3776e",
+      "type": "Wait",
+      "title": "Wait",
+      "x": -150.0,
+      "y": 200.0,
+      "fields": {
+        "seconds": 1.0
+      }
+    },
+    {
+      "id": "68eed908f1784a66873777bb1c06222c",
+      "type": "IncrementCounter",
+      "title": "Increment Counter",
+      "x": 150.0,
+      "y": 200.0,
+      "fields": {
+        "entry": "counter",
+        "step": 1
+      }
+    },
+    {
+      "id": "4a47b4d51104458b908564a0c624c1f6",
+      "type": "Print Message",
+      "title": "Print Counter",
+      "x": 450.0,
+      "y": 200.0,
+      "fields": {
+        "Level": 4,
+        "Source": "counter",
+        "Message": ""
+      }
+    },
+    {
+      "id": "2b35cd0e3b344f2194addf8f9561b40e",
+      "type": "Notes",
+      "title": "Notes",
+      "x": 300.0,
+      "y": -150.0,
+      "text": "A first tree: it says hello, waits a second and counts.\nPress Execute; switch on Loop Execution in Configure to repeat.",
+      "width": 360,
+      "height": 110
+    }
+  ],
+  "connections": [
+    {
+      "parent": "e769fd4938154994b915d80e8742ed8a",
+      "child": "bd42f5b100c54a0b998309068efa40d0"
+    },
+    {
+      "parent": "e769fd4938154994b915d80e8742ed8a",
+      "child": "05ffd6e0aa7b416b81ba9239daa3776e"
+    },
+    {
+      "parent": "e769fd4938154994b915d80e8742ed8a",
+      "child": "68eed908f1784a66873777bb1c06222c"
+    },
+    {
+      "parent": "e769fd4938154994b915d80e8742ed8a",
+      "child": "4a47b4d51104458b908564a0c624c1f6"
+    }
+  ]
+}

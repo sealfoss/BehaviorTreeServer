@@ -1,0 +1,30 @@
+{
+  "format": "behavior_tree_widget_blackboard",
+  "version": 1,
+  "blackboard": [
+    {
+      "name": "counter",
+      "type": "Integer",
+      "value": 0
+    },
+    {
+      "name": "battery",
+      "type": "Double",
+      "value": 20.0,
+      "reset": true
+    },
+    {
+      "name": "position",
+      "type": "List",
+      "value": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "last_message",
+      "type": "String",
+      "value": ""
+    }
+  ]
+}

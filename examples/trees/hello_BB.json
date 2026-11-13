@@ -1,0 +1,11 @@
+{
+  "format": "behavior_tree_widget_blackboard",
+  "version": 1,
+  "blackboard": [
+    {
+      "name": "counter",
+      "type": "Integer",
+      "value": 0
+    }
+  ]
+}

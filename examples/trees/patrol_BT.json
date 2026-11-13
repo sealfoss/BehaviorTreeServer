@@ -1,0 +1,132 @@
+{
+  "format": "behavior_tree_widget",
+  "version": 1,
+  "config": {
+    "tick_interval_ms": 100,
+    "repeat": false,
+    "restore_blackboard": false,
+    "default_memory": true
+  },
+  "view": {
+    "zoom": 1.0,
+    "center": [
+      0.0,
+      200.0
+    ]
+  },
+  "nodes": [
+    {
+      "id": "c5bb09c5607d429db0658fd87573cd35",
+      "type": "Root",
+      "title": "Root",
+      "x": 0.0,
+      "y": 0.0,
+      "composite": "Selector",
+      "memory": false
+    },
+    {
+      "id": "02af12662e304b0fbe1f8980e50a85bb",
+      "type": "Sequence",
+      "title": "Done?",
+      "x": -300.0,
+      "y": 200.0,
+      "memory": true
+    },
+    {
+      "id": "e8af48cbebce44ceadf59ff9de8357ca",
+      "type": "CounterAtLeast",
+      "title": "Counter At Least",
+      "x": -450.0,
+      "y": 400.0,
+      "fields": {
+        "entry": "counter",
+        "threshold": 3
+      }
+    },
+    {
+      "id": "843afc93ab394339b6284f2ea05c8f27",
+      "type": "LogMessage",
+      "title": "Report",
+      "x": -150.0,
+      "y": 400.0,
+      "fields": {
+        "message": "Patrol complete",
+        "level": [
+          "INFO",
+          "WARNING",
+          "ERROR"
+        ]
+      },
+      "field_selections": {
+        "level": 0
+      }
+    },
+    {
+      "id": "660a232b38524bfcb4fc29bbd2c5bcc5",
+      "type": "Sequence",
+      "title": "Patrol Step",
+      "x": 300.0,
+      "y": 200.0,
+      "memory": true
+    },
+    {
+      "id": "3bb03860baaf4184b3f855fc20f31f70",
+      "type": "MoveTo",
+      "title": "Move To",
+      "x": 150.0,
+      "y": 400.0,
+      "fields": {
+        "x": 5.0,
+        "y": 2.5,
+        "speed": 5,
+        "mode": [
+          "walk",
+          "run",
+          "crawl"
+        ],
+        "avoid_obstacles": true,
+        "label": "waypoint"
+      },
+      "field_selections": {
+        "mode": 0
+      }
+    },
+    {
+      "id": "ebe5fee93ef24afb9cafc31c32eca636",
+      "type": "IncrementCounter",
+      "title": "Increment Counter",
+      "x": 450.0,
+      "y": 400.0,
+      "fields": {
+        "entry": "counter",
+        "step": 1
+      }
+    }
+  ],
+  "connections": [
+    {
+      "parent": "c5bb09c5607d429db0658fd87573cd35",
+      "child": "02af12662e304b0fbe1f8980e50a85bb"
+    },
+    {
+      "parent": "c5bb09c5607d429db0658fd87573cd35",
+      "child": "660a232b38524bfcb4fc29bbd2c5bcc5"
+    },
+    {
+      "parent": "02af12662e304b0fbe1f8980e50a85bb",
+      "child": "e8af48cbebce44ceadf59ff9de8357ca"
+    },
+    {
+      "parent": "02af12662e304b0fbe1f8980e50a85bb",
+      "child": "843afc93ab394339b6284f2ea05c8f27"
+    },
+    {
+      "parent": "660a232b38524bfcb4fc29bbd2c5bcc5",
+      "child": "3bb03860baaf4184b3f855fc20f31f70"
+    },
+    {
+      "parent": "660a232b38524bfcb4fc29bbd2c5bcc5",
+      "child": "ebe5fee93ef24afb9cafc31c32eca636"
+    }
+  ]
+}
