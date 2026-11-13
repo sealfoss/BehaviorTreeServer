@@ -230,3 +230,22 @@ async def test_ros_link_validate_describe_pause_reset_and_rejections(factory, st
     await link.stop(run_id)
     assert await until(lambda: listener.results and listener.results[0].goal_status == "canceled")
     await link.close()
+
+
+async def test_ros_link_entries_carry_source_problems_while_they_last(factory, start_executor):
+    executor = start_executor("rl_problem")
+    link, listener = await started_link(factory, executor.name)
+    level_id = new_id()
+    source = {"topic": f"{executor.ns}_robot/level", "type": "std_msgs/msg/Float64", "field": "nope"}
+    blackboard = [{"id": level_id, "name": "level", "type": "Double", "value": 0.0, "source": source}]
+    run_id = await link.execute(tree(leaf("TestHold")), blackboard, "rl_problem", "pytest")
+    assert await until(lambda: listener.blackboard.get(level_id, {}).get("problem"), 5.0)
+    snapshot = await link.snapshot()
+    assert [entry.get("problem") for entry in snapshot["blackboard"]] == [listener.blackboard[level_id]["problem"]]
+    fixed = {**source, "field": "data"}
+    assert (await link.apply([{"op": "bb.set_source", "id": level_id, "source": fixed}]))[0] == APPLIED
+    assert await until(lambda: level_id in listener.blackboard and "problem" not in listener.blackboard[level_id], 5.0)
+    assert all("problem" not in entry for entry in (await link.snapshot())["blackboard"])
+    await link.stop(run_id)
+    assert await until(lambda: listener.results)
+    await link.close()

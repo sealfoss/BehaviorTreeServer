@@ -24,7 +24,9 @@ gone; updates numbered up to the snapshot's are then dropped. ``~/log`` records 
 run; a gap is filled from ``~/get_log`` before the later records are reported, so listeners see
 every record once, in order. Updates of a run whose result has arrived are ignored (4.2).
 
-**Values.** Blackboard entries and results reach listeners decoded (Python values); ``apply``
+**Values.** Blackboard entries and results reach listeners decoded (Python values), with every
+other key the executor sent kept (``freshness``; ``problem`` while an entry's source cannot feed
+it, design 7.4); ``apply``
 encodes the values of its operations into the file encoding for ``ops_json``, and ``execute``
 and ``validate`` send ``blackboard`` lists as they are (file form, encoded values).
 

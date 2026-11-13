@@ -13,6 +13,7 @@ clients made here: no locks are needed, and no call may block.
     run.run_uuid          # the same, 16 bytes (for a unique_identifier_msgs/UUID)
     run.status_topic      # "/cell1/bt_executor/status": this executor's ~/status
     run.cancel_timeout_s  # the tree's Cancel timeout (its option, 5 s by default)
+    run.bundle            # the run's bundle (design 4.3), parsed: a dict; do not change it
     run.journal           # the goal journal (bt_server_executor.journal.GoalJournal)
     run.clients           # the client cache (ClientCache)
     run.scheduler         # the executor's scheduler (now(), ros_now(), call_soon(), call_at())
@@ -167,7 +168,7 @@ class RunContext:
 
     def __init__(self, *, node: Node, executor_name: str, status_topic: str, journal: GoalJournal,
                  clients: ClientCache, scheduler: Any, log: Callable[[int, str], None],
-                 cancel_timeout_s: float = 5.0) -> None:
+                 cancel_timeout_s: float = 5.0, bundle: dict | None = None) -> None:
         self.node = node
         self.executor_name = executor_name
         self.status_topic = status_topic
@@ -175,6 +176,7 @@ class RunContext:
         self.clients = clients
         self.scheduler = scheduler
         self.cancel_timeout_s = cancel_timeout_s
+        self.bundle: dict = bundle if bundle is not None else {}
         self._log = log
         self.run_id = ""
         self.run_uuid = bytes(16)

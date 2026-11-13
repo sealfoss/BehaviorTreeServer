@@ -19,7 +19,9 @@ The tree API (4.1), under the node's name (``~``):
   ``status_rate_hz`` times a second and at least every ``heartbeat_period_s``; carries the
   outcome of the last run, the leaves cancelling and the unsettled goals.
 * ``~/blackboard``, ``~/details`` (numbered, at most ``blackboard_rate_hz`` batches a second;
-  the blackboard in full at the start of a run), ``~/log`` (numbered records in batches, kept
+  the blackboard in full at the start of a run; an entry whose source cannot feed it carries
+  ``"problem": text``, here and in ``~/get_snapshot``, and is sent again when the problem
+  appears, changes or clears), ``~/log`` (numbered records in batches, kept
   for late joiners).
 * Services ``~/get_snapshot``, ``~/get_log``, ``~/apply``, ``~/describe``, ``~/validate``,
   ``~/pause`` (``std_srvs/SetBool``), ``~/reset`` (``std_srvs/Trigger``).
@@ -89,6 +91,8 @@ _LOG_BATCH_MAX = 100
 _GET_LOG_MAX = 1000
 #: Runs whose log files ``~/get_log`` still finds by id.
 _RUNS_KEPT = 50
+#: How often the problems of the sources are looked at during a run.
+_PROBLEM_CHECK_S = 0.5
 #: How often unused cached clients are looked for.
 _SWEEP_PERIOD_S = 60.0
 
@@ -323,6 +327,7 @@ class ExecutorNode(Node):
         self._bb_removed: dict[str, None] = {}
         self._bb_order: list[str] | None = None
         self._bb_timer: Any = None
+        self._problems: dict[str, str] = {}  # entry id -> why its source cannot feed it (7.4)
         self._last_bb_at = float("-inf")
         self._details_seq = 0
         self._details_pending: dict[tuple[int, str], dict] = {}
@@ -519,18 +524,47 @@ class ExecutorNode(Node):
             return
         if full:
             board = run.blackboard
-            update = {"entries": [board.entry(entry_id) for entry_id in board.ids()], "removed": [],
-                      "order": board.ids()}
+            update = {"entries": self._entries_of(board), "removed": [], "order": board.ids()}
         else:
             if not self._bb_pending and not self._bb_removed and self._bb_order is None:
                 return
-            update = {"entries": list(self._bb_pending.values()), "removed": list(self._bb_removed),
-                      "order": self._bb_order}
+            update = {"entries": [self._with_problem(entry) for entry in self._bb_pending.values()],
+                      "removed": list(self._bb_removed), "order": self._bb_order}
         self._bb_pending, self._bb_removed, self._bb_order = {}, {}, None
         self._blackboard_seq += 1
         self._blackboard_pub.publish(BlackboardUpdate(run_id=_uuid_msg(run.uuid), seq=self._blackboard_seq,
                                                       full=full, update_json=dumps_json(update, indent=None)))
         self._last_bb_at = self.scheduler.now()
+
+    def _with_problem(self, entry: dict) -> dict:
+        """The entry with ``"problem"`` when its source cannot feed it now (design 7.4: the
+        Blackboard tab says so); without the key otherwise."""
+        problem = self._problems.get(entry["id"])
+        if problem is None:
+            return entry
+        return {**entry, "problem": problem}
+
+    def _entries_of(self, board: Blackboard) -> list[dict]:
+        return [self._with_problem(board.entry(entry_id)) for entry_id in board.ids()]
+
+    def _check_problems(self, run: _Run) -> None:
+        """Publish the entries whose source problem appeared, changed or cleared; again every
+        :data:`_PROBLEM_CHECK_S` while the run lasts."""
+        if not run.active or run.sources is None or run is not self.current_run:
+            return
+        ids = set(run.blackboard.ids())
+        problems = {entry_id: text for entry_id, text in run.sources.problems.items() if entry_id in ids}
+        changed = {entry_id for entry_id in problems.keys() | self._problems.keys()
+                   if problems.get(entry_id) != self._problems.get(entry_id)}
+        self._problems = problems
+        for entry_id in changed:
+            if entry_id in ids:
+                self._bb_removed.pop(entry_id, None)
+                self._bb_pending[entry_id] = run.blackboard.entry(entry_id)
+        if changed:
+            self._bb_timer = self._rate_limited(self._bb_timer, self._last_bb_at, self.blackboard_period,
+                                                self._publish_blackboard)
+        self.scheduler.call_later(_PROBLEM_CHECK_S, lambda: self._check_problems(run))
 
     def on_detail(self, index: int, kind: str, value: object) -> None:
         self._details_pending[(index, kind)] = {"i": index, "kind": kind, "value": value, "stamp": time.time()}
@@ -577,13 +611,17 @@ class ExecutorNode(Node):
         """Read the goal: the runner is made here, so that a bundle that cannot be read rejects
         the goal (R-13). Raises BundleError or ValueError."""
         entries = _parse_blackboard(goal.blackboard_json)
+        try:
+            bundle = loads_json(goal.bundle_json)
+        except ValueError as error:
+            raise BundleError(f"the bundle is not JSON: {error}") from error
         blackboard = Blackboard(entries)
         sink = _Sink(self)
         context = RunContext(node=self, executor_name=self.full_name, status_topic=self.status_topic,
                              journal=self.journal, clients=self.client_cache, scheduler=self.scheduler,
-                             log=self._log_to_run)
+                             log=self._log_to_run, bundle=bundle)
         holder: list[_Run] = []
-        runner = TreeRunner(goal.bundle_json, blackboard, self.registry, self.scheduler, sink,
+        runner = TreeRunner(bundle, blackboard, self.registry, self.scheduler, sink,
                             lambda result: self._on_finished(holder[0], result), run_context=context,
                             max_tick_rate_hz=self.max_tick_rate_hz)
         context.cancel_timeout_s = runner.config["cancel_timeout_ms"] / 1000.0
@@ -638,6 +676,7 @@ class ExecutorNode(Node):
         self._flush_log()
         self._bb_pending, self._bb_removed, self._bb_order = {}, {}, None
         self._details_pending = {}
+        self._problems = {}
         self.current_run = run
         self._runs[run.hex] = run
         while len(self._runs) > _RUNS_KEPT:
@@ -660,6 +699,7 @@ class ExecutorNode(Node):
             try:
                 self._sources.start(run.blackboard, runner.request_tick)
                 run.sources = self._sources
+                self._check_problems(run)
             except Exception as error:  # noqa: BLE001 - sources are optional; the run goes on
                 self.on_log(run, LogLevel.ERROR, f"The sources could not be started: {error}", -1)
         runner.start()
@@ -741,7 +781,7 @@ class ExecutorNode(Node):
                                requested_by=run.requested_by, bundle_json=run.bundle_json,
                                node_paths=list(run.runner.node_paths))
         board = run.blackboard
-        response.blackboard_json = dumps_json([board.entry(entry_id) for entry_id in board.ids()], indent=None)
+        response.blackboard_json = dumps_json(self._entries_of(board), indent=None)
         response.details_json = _json([{"i": index, "kind": kind, "value": value}
                                        for index, kinds in sorted(run.runner.details().items())
                                        for kind, value in kinds.items()])
