@@ -132,7 +132,7 @@ class LocalLink:
         self._pending_entries: dict[str, dict] = {}
         self._pending_removed: list[str] = []
         self._pending_order: list[str] | None = None
-        self._pending_details: dict[tuple[int, str], dict] = {}
+        self._pending_details: dict[tuple, dict] = {}
         self._pending_log: list[LinkRecord] = []
         self._status_throttle: _Throttle | None = None
         self._batch_throttle: _Throttle | None = None
@@ -299,13 +299,15 @@ class LocalLink:
         except (OpError, ValueError) as error:
             return REJECTED, str(error)
         for op in ops:
-            if op.get("op") == "node.set_field":
+            if op.get("op") in ("node.set_field", "node.set_selection"):
                 self._report_field(runner, op)
         return APPLIED, ""
 
     @staticmethod
     def _report_field(runner: TreeRunner, op: dict) -> None:
-        """A field set through ``apply`` goes back as a ``field`` detail of each instance."""
+        """A field (or a choice) set through ``apply`` goes back as a ``field`` detail of each
+        instance: ``{"tree", "id", "field", "value"}``, or ``{"tree", "id", "field",
+        "selection"}`` for a ``node.set_selection``."""
         for index in range(len(runner.node_paths)):
             node = runner.node(index)
             fields = getattr(node, "fields", None)
@@ -313,12 +315,15 @@ class LocalLink:
                 continue
             if op.get("tree") is not None and getattr(node, "tree_key", None) != op.get("tree"):
                 continue
-            try:
-                value = encode_value(fields.get(op.get("field")))
-            except TypeError:
-                value = None
-            runner.detail(index, "field", {"tree": node.tree_key, "id": node.node_id, "field": op.get("field"),
-                                           "value": value})
+            detail: dict = {"tree": node.tree_key, "id": node.node_id, "field": op.get("field")}
+            if op.get("op") == "node.set_selection":
+                detail["selection"] = op.get("index")
+            else:
+                try:
+                    detail["value"] = encode_value(fields.get(op.get("field")))
+                except TypeError:
+                    detail["value"] = None
+            runner.detail(index, "field", detail)
 
     async def snapshot(self) -> dict:
         self._check_online()
@@ -398,7 +403,12 @@ class LocalLink:
         self._request_batch()
 
     def detail(self, index: int, kind: str, value: object) -> None:
-        self._pending_details[(index, kind)] = {"i": index, "kind": kind, "value": value, "stamp": time.time()}
+        """Details wait for the next batch, the latest per node and kind; ``field`` details per
+        field (and selection), so that two fields set close together both go out."""
+        key: tuple = (index, kind)
+        if kind == "field" and isinstance(value, dict):
+            key = (index, kind, value.get("field"), "selection" in value)
+        self._pending_details[key] = {"i": index, "kind": kind, "value": value, "stamp": time.time()}
         self._request_batch()
 
     def record(self, level: int, text: str, index: int) -> None:

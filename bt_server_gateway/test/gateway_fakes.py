@@ -109,7 +109,7 @@ class FakeLink:
     async def snapshot(self) -> dict:
         self._check()
         return {"run": self.run, "status": LinkStatus(self.run.run_id, self.seq, self.state, 0, 0, 0, 0, "", b""),
-                "blackboard_seq": 0, "blackboard": [], "details_seq": 0, "details": [], "log_seq": -1}
+                "blackboard_seq": 0, "blackboard": None, "details_seq": 0, "details": [], "log_seq": -1}
 
     async def get_log(self, run_id: str | None, from_seq: int, max_records: int) -> list[LinkRecord]:
         self._check()

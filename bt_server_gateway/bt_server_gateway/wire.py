@@ -1,8 +1,8 @@
 """Forms of the browser protocol (contract 5.1, design 10.3) that are not a document's.
 
 Every value goes through :mod:`bt_server_core.values`. A blackboard value whose wire text is
-longer than 64 KB is sent as its first 64 KB with ``"truncated": true`` (design 7.6); ``ask
-entry_value`` returns all of it.
+longer than 64 KB (in UTF-8) is sent as its first 64 KB with ``"truncated": true`` (design 7.6);
+``ask entry_value`` returns all of it.
 """
 
 from __future__ import annotations
@@ -34,12 +34,17 @@ def entry_to_wire(entry: dict, freshness: str | None = None, age: float | None =
     """An entry dict (decoded value) in wire form, its value shortened to 64 KB. ``problem``:
     why its source cannot feed it, as the executor reports it."""
     wire = value_to_wire(entry["type"], entry.get("value"))
-    truncated = isinstance(wire, str) and len(wire) > PREVIEW_LIMIT
+    truncated = False
+    if isinstance(wire, str) and len(wire) > PREVIEW_LIMIT // 4:  # beyond 16 K characters it may exceed 64 KB
+        encoded = wire.encode("utf-8", "surrogatepass")
+        if len(encoded) > PREVIEW_LIMIT:
+            truncated = True
+            wire = encoded[:PREVIEW_LIMIT].decode("utf-8", "ignore")
     return {
         "id": entry["id"],
         "name": entry["name"],
         "type": entry["type"],
-        "value": wire[:PREVIEW_LIMIT] if truncated else wire,
+        "value": wire,
         "reset": bool(entry.get("reset", False)),
         "source": entry.get("source"),
         "freshness": freshness,

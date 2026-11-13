@@ -261,7 +261,8 @@ class RosLink:
         self._details_seq: int | None = None
         self._details: dict[tuple[int, str], Any] = {}
         self._details_run: str | None = None
-        self._repairing: asyncio.Task | None = None
+        self._repairing: asyncio.Future | None = None
+        self._held: list[Any] | None = None  # updates that arrived during a repair
         self._log_next: dict[str, int] = {}
         self._log_queue: asyncio.Queue | None = None
         self._log_task: asyncio.Task | None = None
@@ -390,13 +391,16 @@ class RosLink:
         return run_id is not None and run_id in self._finished_runs
 
     def _on_blackboard_msg(self, msg: BlackboardUpdate) -> None:
+        if self._held is not None:
+            self._held.append(msg)  # a repair is under way: reported after its snapshot
+            return
         run_id = _hex(msg.run_id)
         expected = self._bb_seq
         if expected is not None and msg.seq <= expected:
             return  # covered by a snapshot already
         self._bb_seq = msg.seq
         if expected is not None and msg.seq != expected + 1 and not msg.full:
-            self._repair()
+            self._repair(msg)
             return
         if self._closed_run(run_id) or run_id is None:
             return
@@ -407,13 +411,16 @@ class RosLink:
         self._emit(lambda listener: listener.on_blackboard(run_id, msg.seq, msg.full, update))
 
     def _on_details_msg(self, msg: NodeDetails) -> None:
+        if self._held is not None:
+            self._held.append(msg)
+            return
         run_id = _hex(msg.run_id)
         expected = self._details_seq
         if expected is not None and msg.seq <= expected:
             return
         self._details_seq = msg.seq
         if expected is not None and msg.seq != expected + 1:
-            self._repair()
+            self._repair(msg)
             return
         if self._closed_run(run_id) or run_id is None:
             return
@@ -431,20 +438,38 @@ class RosLink:
                 self._details[key] = item.get("value")
         self._emit(lambda listener: listener.on_details(run_id, msg.seq, items))
 
-    def _repair(self) -> None:
-        """Updates were lost: report the state of a snapshot instead."""
-        if self._repairing is None or self._repairing.done():
-            self._repairing = asyncio.ensure_future(self._repair_now())
+    def _repair(self, trigger: Any) -> None:
+        """Updates were lost: report the state of a snapshot instead. Updates that arrive while
+        the snapshot is asked for are held, and those numbered above it are reported after it
+        (4.2: apply the updates with a higher number), so nothing older wins."""
+        self._held = [trigger]
+        self._repairing = asyncio.ensure_future(self._repair_now())
+
+    def _release_held(self) -> None:
+        held, self._held = self._held or [], None
+        for msg in held:
+            if isinstance(msg, BlackboardUpdate):
+                RosLink._on_blackboard_msg(self, msg)
+            else:
+                RosLink._on_details_msg(self, msg)
 
     async def _repair_now(self) -> None:
         try:
             snap = await self.snapshot()
         except (LinkDown, CommandRefused, TimeoutError) as error:
             log.warning("%s: a gap in the updates could not be repaired: %s", self.name, error)
+            self._forget_numbers()  # take what comes next as it is
+            self._release_held()
             return
+        try:
+            self._report_snapshot(snap)
+        finally:
+            self._release_held()
+
+    def _report_snapshot(self, snap: dict) -> None:
         run_id = snap["run"].run_id
-        self._bb_seq = max(self._bb_seq or 0, snap["blackboard_seq"])
-        self._details_seq = max(self._details_seq or 0, snap["details_seq"])
+        self._bb_seq = snap["blackboard_seq"]
+        self._details_seq = snap["details_seq"]
         if run_id is None or self._closed_run(run_id):
             return
         entries = snap["blackboard"]

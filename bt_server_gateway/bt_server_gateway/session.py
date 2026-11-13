@@ -17,8 +17,10 @@ when the answer is ``NO_RUN`` (K-05), after the result if that is still on its w
 values become the gateway's copy; later updates of that run are ignored. ``bb.set_source`` waits
 for the end of the run.
 
-**Fields during a run** are the executor's too: a ``node.set_field`` is sent through ``apply``
-and the document changes only when the value comes back as a ``field`` detail (G-05).
+**Fields during a run** are the executor's too: a ``node.set_field`` or ``node.set_selection``
+is sent through ``apply`` to every session whose run holds the tree, and the document changes
+only when the value comes back as a ``field`` detail (G-05). Bindings, outputs and cancel
+options are read when a leaf starts: they are refused while the tree starts or runs.
 
 **Runs the gateway did not start** are shown read-only from ``RunInfo``; the session's own
 tree and blackboard are not touched, and Stop works by run id (4.5).
@@ -27,15 +29,15 @@ tree and blackboard are not touched, and Stop works by run id (4.5).
 from __future__ import annotations
 
 import asyncio
-import copy
 import logging
 import time
 from collections import deque
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from bt_server_core.blackboard import BlackboardSnapshot, OpError, new_entry_id
 from bt_server_core.bundle import REMOTE_SUB_TREE, build_bundle, sub_bundle
-from bt_server_core.document import STRUCTURAL_OPS, OpRefused, TreeDocument
+from bt_server_core.document import STRUCTURAL_OPS, OpRefused
 from bt_server_core.files import blackboard_file_path
 from bt_server_core.values import canonical_type, decode_value, equal_values, from_wire
 
@@ -59,7 +61,7 @@ if TYPE_CHECKING:
     from .client import Client
     from .gateway import Gateway
 
-__all__ = ["LOG_KEEP", "SNAPSHOT_LOG", "Session"]
+__all__ = ["LOG_KEEP", "SNAPSHOT_LOG", "Session", "run_nodes"]
 
 log = logging.getLogger("bt_server_gateway")
 
@@ -71,6 +73,41 @@ SNAPSHOT_LOG = 500
 RESULT_GRACE = 3.0
 #: Seconds without a status during a run after which the executor counts as lost (design 16).
 LOST_AFTER = 2.0
+#: Operations that go to the executor during a run (design 9.3: the executor holds the fields).
+FORWARDED_OPS = frozenset(("node.set_field", "node.set_selection"))
+#: Operations refused during a run: a leaf reads them when it starts.
+BETWEEN_RUNS_OPS = frozenset(("node.set_binding", "node.set_output", "node.set_option"))
+
+
+def run_nodes(bundle: dict) -> set[tuple[str, str]]:
+    """``(tree key, node id)`` of every node a bundle runs on its own executor: those reachable
+    from the root tree's Root, through Sub-Tree nodes (the trees of Remote Sub-Tree nodes run
+    elsewhere)."""
+    trees = bundle.get("trees") or {}
+    result: set[tuple[str, str]] = set()
+    stack, seen = [bundle.get("root")], set()
+    while stack:
+        key = stack.pop()
+        if key in seen or key not in trees:
+            continue
+        seen.add(key)
+        tree = trees[key]
+        nodes = {item.get("id"): item for item in tree.get("nodes", ()) if isinstance(item, dict)}
+        children: dict[str, list[str]] = {}
+        for link in tree.get("connections", ()):
+            if isinstance(link, dict):
+                children.setdefault(link.get("parent"), []).append(link.get("child"))
+        walk = [node_id for node_id, item in nodes.items() if item.get("type") == "Root"]
+        while walk:
+            node_id = walk.pop()
+            if node_id not in nodes or (key, node_id) in result:
+                continue
+            result.add((key, node_id))
+            item = nodes[node_id]
+            if item.get("type") == "Sub-Tree" and isinstance(item.get("tree"), str):
+                stack.append(item["tree"])
+            walk.extend(children.get(node_id, ()))
+    return result
 
 
 class Reply:
@@ -114,14 +151,21 @@ class Session:
         self.result_pending = False
         self.run_bundle: dict | None = None
         self.run_keys: set[str] = set()
+        self.run_nodes: set[tuple[str, str]] = set()  # (tree, node id) of the leaves the own run executes
+        self._bundle_keys: dict[str, str] = {}  # document key -> the key the run's bundle uses
+        self._doc_keys: dict[str, str] = {}
         self.finished: set[str] = set()
         self.starting = False
+        self.file_busy = 0  # file commands under way that would replace or rename this session's tree
         self._awaiting_goal = False
         self._run_deferred = False
+        self._early: list[tuple[Callable[..., None], tuple]] = []
+        self._going: str | None = None  # a run not started here that was seen going
+        self._ended: set[str] = set()
         self._held: list[tuple[Reply, str, dict, int | None]] = []
         self._after_result: list[tuple[Reply | None, dict]] = []
         self._pending_sources: list[dict] = []
-        self._pending_fields: dict[tuple[str, str, str], int] = {}
+        self._pending_fields: dict[tuple[str, str, str, str], int] = {}
         self._result_timer: asyncio.TimerHandle | None = None
         self.details: dict[int, dict[str, Any]] = {}
         self.log: deque[tuple[int, list]] = deque(maxlen=LOG_KEEP)
@@ -147,7 +191,8 @@ class Session:
         return self.starting or self.result_pending or (self.status is not None and self.status.state != 0)
 
     def own_active(self) -> bool:
-        return self.result_pending and self.run is not None and self.run.run_id == self.own_run_id
+        """A run this session started is going (its goal was accepted; no result yet)."""
+        return self.result_pending and self.own_run_id is not None
 
     def run_message(self, event: str, with_bundle: bool | None = None) -> dict | None:
         run = self.run
@@ -183,7 +228,7 @@ class Session:
             "starting": self.starting, "run": run, "st": st,
             "details": {str(index): dict(kinds) for index, kinds in self.details.items() if kinds},
             "log": {"first": lines[0][0] if lines else self._log_next, "lines": [line for _, line in lines]},
-            "recovery": sorted(key for key in self.gw.docs.recovery_keys if key == self.root or key in self.docs
+            "recovery": sorted(key for key in self.gw.docs.offered if key == self.root or key in self.docs
                                or key in client.shown or self.gw.docs.get(key) is None),
             "attached": len(self.clients()), "findings": list(self.findings),
         }
@@ -293,6 +338,8 @@ class Session:
             self._pending_sources.append(decoded)
             reply.ok(pending=True)
             return
+        if decoded.get("op") == "bb.add" and decoded["entry"].get("source") is not None:
+            self.board.declare(decoded["entry"]["id"], decoded["entry"].get("value"))  # what the file keeps
         try:
             code, message = await self.link.apply([decoded])
         except LinkDown as error:
@@ -329,23 +376,30 @@ class Session:
             reply.no(f"the document {key!r} is not open")
             return
         name = op.get("op")
-        owner = self.gw.run_owner(key)
-        if owner is not None:
+        owners = self.gw.run_owners(key)
+        if owners:
             if name in STRUCTURAL_OPS:
                 reply.no("the tree is executing: nodes cannot be added, removed or connected, nor composites changed")
                 return
-            if name == "node.set_field" and owner.starting:
-                reply.deferred = True
-                owner._held.append((reply, key, op, rev))
+            if name in BETWEEN_RUNS_OPS:
+                reply.no("the tree is executing: bindings, outputs and cancel options are read when a leaf starts; "
+                         "change them between runs")
                 return
-            if name == "node.set_field" and owner.own_active() and owner.in_run(op.get("id")):
-                await owner.forward_field(reply, document, op)
+            starting = next((owner for owner in owners if owner.starting), None)
+            if starting is not None and (name in FORWARDED_OPS or (name == "doc.set_config" and key == starting.root)):
+                reply.deferred = True  # sent once the goal is answered (design 9.5)
+                starting._held.append((reply, key, op, rev))
                 return
+            if name in FORWARDED_OPS:
+                running = [owner for owner in owners if owner.own_active() and owner.in_run(key, op.get("id"))]
+                if running:
+                    await self.gw.forward_edit(reply, document, op, running, self.board.types())
+                    return
         if name == "group.promote":
             await self.gw.promote(self, reply, client, document, op)
             return
         try:
-            applied = document.apply(op, running=owner is not None, entry_types=self.board.types(),
+            applied = document.apply(op, running=bool(owners), entry_types=self.board.types(),
                                      rev=rev if isinstance(rev, int) else None)
         except OpRefused as error:
             reply.no(error.reason)
@@ -353,52 +407,38 @@ class Session:
         self.gw.broadcast_op(key, applied.op, applied.rev, client.id, reply.cid)
         extra = {"reorder": applied.reorder} if applied.reorder else {}
         reply.ok(rev=applied.rev, **extra)
-        if name == "doc.set_config" and owner is self and self.own_active() and key == self.root:
-            try:
-                await self.link.apply([{"op": "doc.set_config", "config": applied.op.get("config", {})}])
-            except LinkDown:
-                pass
+        if name == "doc.set_config":
+            for owner in owners:
+                if owner.own_active() and key == owner.root:
+                    try:
+                        await owner.link.apply([{"op": "doc.set_config", "config": applied.op.get("config", {})}])
+                    except LinkDown:
+                        pass
 
-    def in_run(self, node_id: Any) -> bool:
-        """Whether a node with this id runs in the current run."""
-        run = self.run
-        return run is not None and isinstance(node_id, str) and any(
-            path.rsplit("/", 1)[-1] == node_id for path in run.node_paths)
+    def _set_run_trees(self, bundle: dict) -> None:
+        """The trees and leaves of the own run, by document key (as spelt on disk)."""
+        self._bundle_keys = {self.gw.canonical(key): key for key in bundle.get("trees", {})}
+        self._doc_keys = {key: canonical for canonical, key in self._bundle_keys.items()}
+        self.run_keys = set(self._bundle_keys)
+        self.run_nodes = {(self._doc_keys.get(key, key), node_id) for key, node_id in run_nodes(bundle)}
 
-    async def forward_field(self, reply: Reply, document: TreeDocument, op: dict) -> None:
-        """A field edit during the run goes to the executor; the document follows when the value
-        comes back on the details (G-05)."""
-        probe = copy.deepcopy(document)
-        try:
-            probe.apply(op, entry_types=self.board.types())
-        except OpRefused as error:
-            reply.no(error.reason)
-            return
-        node_id, field = op["id"], op["field"]
-        target = (document.key, node_id, field)
-        value = probe.fields(node_id).get(field)
+    def in_run(self, key: str, node_id: Any) -> bool:
+        """Whether the own run executes the leaf ``node_id`` of the tree ``key``."""
+        return isinstance(node_id, str) and (key, node_id) in self.run_nodes
+
+    async def send_edit(self, op: dict) -> tuple[int, str]:
+        """Send a field or choice edit to the executor; the document follows when it comes back."""
+        target = (op["tree"], op["id"], op["field"], "selection" if op["op"] == "node.set_selection" else "value")
         self._pending_fields[target] = self._pending_fields.get(target, 0) + 1
         try:
-            code, message = await self.link.apply([{"op": "node.set_field", "tree": document.key, "id": node_id,
-                                                    "field": field, "value": value}])
+            code, message = await self.link.apply([dict(op, tree=self._bundle_keys.get(op["tree"], op["tree"]))])
         except LinkDown as error:
             code, message = -1, f"the executor cannot be reached: {error}"
         if code != APPLIED:
             self._release_field(target)
-        if code == APPLIED:
-            reply.ok(rev=document.rev)
-        elif code == NO_RUN:
-            try:
-                applied = document.apply(op, entry_types=self.board.types())
-            except OpRefused as error:
-                reply.no(error.reason)
-                return
-            self.gw.broadcast_op(document.key, applied.op, applied.rev, reply.client.id, reply.cid)
-            reply.ok(rev=applied.rev)
-        else:
-            reply.no(message or "the executor refused the change")
+        return code, message
 
-    def _release_field(self, target: tuple[str, str, str]) -> bool:
+    def _release_field(self, target: tuple[str, str, str, str]) -> bool:
         count = self._pending_fields.get(target, 0)
         if count <= 0:
             return False
@@ -415,6 +455,7 @@ class Session:
         if not isinstance(value, dict):
             return
         tree, node_id = value.get("tree"), value.get("id")
+        tree = self._doc_keys.get(tree, tree) if isinstance(tree, str) else tree
         document = self.gw.docs.get(tree) if isinstance(tree, str) else None
         if document is None or not isinstance(node_id, str) or not document.has_node(node_id):
             return
@@ -433,14 +474,21 @@ class Session:
         field = value.get("field")
         if not isinstance(field, str):
             return
-        by_browser = self._release_field((tree, node_id, field))
+        selection = "selection" in value
+        by_browser = self._release_field((tree, node_id, field, "selection" if selection else "value"))
         if not by_browser and tree != self.root:
             return
+        unsaved = document.unsaved
         try:
-            if equal_values(document.fields(node_id).get(field), decode_value(value.get("value"))):
-                return
-            unsaved = document.unsaved
-            applied = document.set_field_file(node_id, field, value.get("value"), types)
+            if selection:
+                if document.file_item(node_id).get("field_selections", {}).get(field) == value["selection"]:
+                    return
+                applied = document.apply({"op": "node.set_selection", "id": node_id, "field": field,
+                                          "index": value["selection"]}, entry_types=types)
+            else:
+                if equal_values(document.fields(node_id).get(field), decode_value(value.get("value"))):
+                    return
+                applied = document.set_field_file(node_id, field, value.get("value"), types)
         except (OpRefused, ValueError):
             return
         document.unsaved = unsaved or by_browser
@@ -510,6 +558,9 @@ class Session:
             who = self.run.requested_by if self.run is not None and self.run.requested_by else "someone"
             reply.no(f"the executor is busy: a run started by {who} is going")
             return
+        if self.file_busy:
+            reply.no("a file command on this tree is being carried out; try again")
+            return
         root = self.gw.docs.get(self.root)
         if root is None:
             reply.no("no tree is open")
@@ -523,7 +574,11 @@ class Session:
             except KeyError as error:
                 reply.no(str(error.args[0]) if error.args else "the tree cannot be read")
                 return
-            self.run_keys = set(bundle["trees"])
+            changing = self.gw.changing_keys() & set(bundle["trees"])
+            if changing:
+                reply.no(f"a file command on {', '.join(sorted(changing))} is being carried out; try again")
+                return
+            self._set_run_trees(bundle)
             entries = self.board.to_list()
             findings = await self.validate(bundle, entries)
             self.findings = findings
@@ -556,9 +611,13 @@ class Session:
             self._awaiting_goal = False
             if not accepted:
                 self.run_keys = set()
+                self.run_nodes = set()
             if self._run_deferred:
                 self._run_deferred = False
                 self._announce_run()
+            early, self._early = self._early, []
+            for handler, args in early:  # updates of the run that came before the goal's answer
+                handler(*args)
             self.mark_st()
             await self._release_held()
 
@@ -650,6 +709,7 @@ class Session:
 
     def on_run(self, run: LinkRun) -> None:
         if run.run_id is None:
+            self._end_foreign()
             if self.result_pending:
                 self.notice("error", f"The executor {self.name} restarted: the run ended without a result.")
                 self._end_own_run(None)
@@ -660,6 +720,7 @@ class Session:
         if self.run is not None and self.run.run_id == run.run_id:
             self.run = run
             return
+        self._end_foreign()
         self.run = run
         self.details = {}
         self.log.clear()
@@ -678,9 +739,8 @@ class Session:
         if own and run.run_id not in self.finished and not self.result_pending:
             self.result_pending = True  # recognised after a gateway restart
             self.run_bundle = run.bundle
-            self.run_keys = set((run.bundle or {}).get("trees", {}))
         if own and self.run_bundle is not None:
-            self.run_keys = set(self.run_bundle.get("trees", {}))
+            self._set_run_trees(self.run_bundle)
         for client in self.clients():
             client.clear_log()
             client.push(self.run_message("started"))
@@ -695,6 +755,12 @@ class Session:
             self.lost = False
             self.notice("info", f"The executor {self.name} reports again.")
         self.mark_st()
+        run = self.run
+        if run is not None and run.run_id == status.run_id and run.run_id != self.own_run_id:
+            if status.state != 0:
+                self._going = run.run_id
+            elif self._going == run.run_id:
+                self._end_foreign()
         if self.result_pending and status.run_id == self.own_run_id:
             if status.state == 0:
                 if self._result_timer is None:
@@ -703,6 +769,19 @@ class Session:
             elif self._result_timer is not None:
                 self._result_timer.cancel()
                 self._result_timer = None
+
+    def _end_foreign(self) -> None:
+        """A run not started here that was seen going has ended (or was replaced): ``run ended``."""
+        run = self.run
+        if run is None or self._going != run.run_id or run.run_id in self._ended:
+            return
+        self._going = None
+        self._ended.add(run.run_id)
+        message = self.run_message("ended", with_bundle=True)
+        if message is None:
+            return
+        for client in self.clients() + self.watchers():
+            client.push(message)
 
     def check_lost(self) -> None:
         """Called every half second: "executor lost" when the status stops during a run."""
@@ -720,6 +799,9 @@ class Session:
             self._end_own_run(None)
 
     def on_blackboard(self, run_id: str, seq: int, full: bool, update: dict) -> None:
+        if self._awaiting_goal:
+            self._early.append((self.on_blackboard, (run_id, seq, full, update)))
+            return
         if run_id in self.finished or run_id != self.own_run_id or not self.result_pending:
             return
         if full:
@@ -736,28 +818,37 @@ class Session:
         self._bb_seq = max(self._bb_seq, seq)
 
     def on_details(self, run_id: str, seq: int, details: list[dict]) -> None:
-        run = self.run
-        if run_id in self.finished or run is None or run.run_id != run_id:
+        if self._awaiting_goal:
+            self._early.append((self.on_details, (run_id, seq, details)))
             return
-        own = run_id == self.own_run_id
+        run = self.run
+        own = run_id == self.own_run_id and self.result_pending
+        current = run is not None and run.run_id == run_id
+        if run_id in self.finished or not (current or own):
+            return
         keys = []
         for item in details:
             index, kind = item.get("i"), item.get("kind")
             if not isinstance(index, int) or not isinstance(kind, str):
                 continue
             value = item.get("value")
+            if own and kind in ("field", "title") and value is not None:
+                self._detail_back(kind, value)
+            if not current:
+                continue
             kinds = self.details.setdefault(index, {})
             if value is None:
                 kinds.pop(kind, None)
             else:
                 kinds[kind] = value
             keys.append((index, kind))
-            if own and kind in ("field", "title") and value is not None:
-                self._detail_back(kind, value)
         for client in self.clients() + self.watchers():
             client.mark_nd(self.name, keys)
 
     def on_log(self, run_id: str, records: list[LinkRecord]) -> None:
+        if self._awaiting_goal:
+            self._early.append((self.on_log, (run_id, records)))
+            return
         run = self.run
         if run is None or run.run_id != run_id:
             return
@@ -815,6 +906,7 @@ class Session:
             self.finished.add(run_id)
         self.result_pending = False
         self.run_keys = set()
+        self.run_nodes = set()
         if self._result_timer is not None:
             self._result_timer.cancel()
             self._result_timer = None
@@ -831,6 +923,8 @@ class Session:
         for op in sources:
             self._apply_late(None, op)
         message = self.run_message("ended")
+        if run_id is not None:
+            self._ended.add(run_id)
         if message is not None:
             if result is not None:
                 message["outcome"], message["message"] = result.outcome, result.message

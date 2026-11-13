@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from .gateway import Gateway
     from .session import Session
 
-__all__ = ["FRAME", "LOG_QUEUE", "LOG_BATCH", "MAX_QUEUE", "Client"]
+__all__ = ["FRAME", "LOG_QUEUE", "LOG_BATCH", "MAX_QUEUE", "MAX_QUEUE_BYTES", "Client"]
 
 log = logging.getLogger("bt_server_gateway")
 
@@ -34,9 +34,10 @@ FRAME = 0.033
 LOG_QUEUE = 10_000
 #: Lines sent in one ``log`` message.
 LOG_BATCH = 2_000
-#: Ordered messages a browser may fall behind before its connection is closed (it reconnects
-#: and gets a snapshot): the bound on what an ordered queue can hold.
+#: Ordered messages (and their bytes) a browser may fall behind before its connection is closed
+#: (it reconnects and gets a snapshot): the bound on what an ordered queue can hold.
 MAX_QUEUE = 20_000
+MAX_QUEUE_BYTES = 16 * 1024 * 1024
 
 _ids = itertools.count(1)
 
@@ -57,6 +58,7 @@ class Client:
         self._send = send
         self._close = close
         self._queue: deque[str] = deque()
+        self._queued_bytes = 0
         self._st: set[str] = set()
         self._nd: dict[str, set[tuple[int, str]]] = {}
         self._bb_changed: set[str] = set()
@@ -76,15 +78,23 @@ class Client:
         """Queue an ordered message."""
         if self._closed:
             return
-        if len(self._queue) >= MAX_QUEUE:
-            log.warning("client %s (%s) fell %d messages behind: closing its connection", self.id, self.address,
-                        MAX_QUEUE)
+        text = dumps(message)
+        if len(self._queue) >= MAX_QUEUE or self._queued_bytes + len(text) > MAX_QUEUE_BYTES:
+            log.warning("client %s (%s) fell %d messages (%d bytes) behind: closing its connection", self.id,
+                        self.address, len(self._queue), self._queued_bytes)
             self._closed = True
             self._queue.clear()
+            self._queued_bytes = 0
             asyncio.get_running_loop().create_task(self._close())
             return
-        self._queue.append(dumps(message))
+        self._queue.append(text)
+        self._queued_bytes += len(text)
         self._wake.set()
+
+    async def _send_queued(self) -> None:
+        text = self._queue.popleft()
+        self._queued_bytes -= len(text)
+        await self._send(text)
 
     def mark_st(self, executor: str) -> None:
         self._st.add(executor)
@@ -167,7 +177,7 @@ class Client:
                 await self._wake.wait()
                 self._wake.clear()
                 while self._queue:
-                    await self._send(self._queue.popleft())
+                    await self._send_queued()
                 if not self._streams_due():
                     continue
                 now = loop.time()
@@ -178,7 +188,7 @@ class Client:
                 for message in self._stream_messages():
                     await self._send(dumps(message))
                     while self._queue:  # an answer is not held up behind a long frame
-                        await self._send(self._queue.popleft())
+                        await self._send_queued()
                 self._frame_due = loop.time() + FRAME
                 if self._streams_due():
                     self._wake.set()

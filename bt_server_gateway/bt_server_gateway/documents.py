@@ -5,7 +5,11 @@ shared by every session that shows it, and its unsaved changes live on the serve
 * **Recovery** (G-18): a document with unsaved changes is also written to
   ``trees_dir/.recovery/<key>_BT.json`` within 2 s of each change (here: at once, then at most
   once a second); the file is removed when the document is saved, reverted or recovered, or its
-  changes are discarded. After a restart the keys with a recovery file are offered to the page.
+  changes are discarded. After a restart the keys with a recovery file are **offered** to the
+  page, and such a file is kept as it is until the offer is answered (recovered or declined):
+  meanwhile this process writes its own recovery data for that tree next to it
+  (``<key>_BT.json.next``), so neither an edit nor a save made first can overwrite or remove
+  what the crash left.
 """
 
 from __future__ import annotations
@@ -67,7 +71,8 @@ class DocumentStore:
         self._recovery: dict[str, FileWriter] = {}
         self._failed: set[str] = set()
         self._on_error = on_error
-        self.recovery_keys: set[str] = set()
+        self.offered: set[str] = set()  # recovery files of an earlier process, not yet answered
+        self._own: set[str] = set()  # keys whose recovery file this process wrote
 
     # ----------------------------------------------------------------- the open documents
     def get(self, key: str | None) -> TreeDocument | None:
@@ -153,24 +158,47 @@ class DocumentStore:
 
     # ----------------------------------------------------------------- recovery
     def recovery_path(self, key: str) -> Path:
+        """The recovery file of ``key`` (the one offered after a restart)."""
         return resolve_in_root(self.trees_dir, f"{RECOVERY_DIR}/{tree_file_name(key)}")
 
+    def _own_path(self, key: str) -> Path:
+        """Where this process writes the recovery data of ``key``: next to an offered file."""
+        path = self.recovery_path(key)
+        return path.with_name(path.name + ".next") if key in self.offered else path
+
     def scan_recovery(self) -> None:
-        """Find the recovery files left by an earlier run of the gateway."""
+        """Find the recovery files left by an earlier run of the gateway: they are offered."""
         folder = self.trees_dir / RECOVERY_DIR
-        self.recovery_keys = set()
+        self.offered = set()
         if not folder.is_dir():
             return
         for path in folder.rglob("*_BT.json"):
             try:
-                self.recovery_keys.add(document_key(path.relative_to(folder).as_posix()))
+                self.offered.add(document_key(path.relative_to(folder).as_posix()))
             except (PathError, ValueError):
                 continue
+
+    async def answer_offer(self, key: str) -> None:
+        """The page recovered or declined the offered file of ``key``: it goes, and this
+        process's recovery data of the tree takes its place."""
+        if key not in self.offered:
+            return
+        writer = self._recovery.get(key)
+        if writer is not None:
+            await writer.flush()
+        next_path = self._own_path(key)
+        self.offered.discard(key)
+        await asyncio.to_thread(_remove, self.recovery_path(key))
+        await asyncio.to_thread(_remove, next_path)
+        self._own.discard(key)
+        document = self._docs.get(key)
+        if document is not None and document.unsaved:
+            self.changed(document)
 
     def changed(self, document: TreeDocument) -> None:
         """A document changed (or was saved): bring its recovery file up to date soon."""
         key = document.key
-        if not document.unsaved and key not in self.recovery_keys and key not in self._recovery:
+        if not document.unsaved and key not in self._own and key not in self._recovery:
             return
         writer = self._recovery.get(key)
         if writer is None:
@@ -181,15 +209,15 @@ class DocumentStore:
 
     async def _write_recovery(self, key: str) -> None:
         document = self._docs.get(key)
-        path = self.recovery_path(key)
+        path = self._own_path(key)
         if document is None or not document.unsaved:
             await asyncio.to_thread(_remove, path)
-            self.recovery_keys.discard(key)
+            self._own.discard(key)
             return
         data = document.to_file()
         data["recovery_of"] = document.path
         await asyncio.to_thread(_write_tree, path, data)
-        self.recovery_keys.add(key)
+        self._own.add(key)
 
     def _recovery_result(self, key: str, error: Exception | None) -> None:
         if error is None:
@@ -209,12 +237,13 @@ class DocumentStore:
         return read_tree_file(self.recovery_path(key))
 
     async def drop_recovery(self, key: str) -> None:
-        """Remove the recovery file of ``key`` (its changes were saved, reverted or discarded)."""
+        """Remove this process's recovery file of ``key`` (its changes were saved, reverted or
+        discarded); an offered file stays until the offer is answered."""
         writer = self._recovery.pop(key, None)
         if writer is not None:
             await writer.flush()
-        await asyncio.to_thread(_remove, self.recovery_path(key))
-        self.recovery_keys.discard(key)
+        await asyncio.to_thread(_remove, self._own_path(key))
+        self._own.discard(key)
 
     async def flush(self) -> None:
         """Write every pending recovery file now (shutdown)."""

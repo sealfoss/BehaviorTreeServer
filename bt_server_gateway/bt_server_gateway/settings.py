@@ -5,7 +5,7 @@ gateway also starts without ROS.
 |---|---|
 | ``link`` | ``"ros"`` (or ``"local"``: the engine inside the gateway, :mod:`.local_link`) |
 | ``http_host`` | ``"127.0.0.1"``: the LAN address to listen on |
-| ``http_port`` | 80 |
+| ``http_port`` | 80; 443 with TLS |
 | ``public_names`` | ``["bt.{hostname}.local", "bt-{hostname}.local", "{hostname}.local"]`` |
 | ``executors`` | ``[]``: executors that have a session even while they are down |
 | ``allowed_networks`` | ``[]``: address ranges that may connect; empty allows all |
@@ -128,12 +128,16 @@ def settings_from_dict(data: dict, base: Path | None = None) -> Settings:
     host = data.get("http_host", "127.0.0.1")
     if not isinstance(host, str) or not host.strip():
         raise SettingsError("'http_host' must be an address")
-    port = data.get("http_port", 80)
+    tls = "tls_cert" in data or "tls_key" in data
+    port = data.get("http_port", 443 if tls else 80)
     if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
         raise SettingsError("'http_port' must be a port number")
     hostname = short_hostname()
-    names = [name.format(hostname=hostname) for name in _text_list(data, "public_names")] \
-        if "public_names" in data else [name.format(hostname=hostname) for name in DEFAULT_PUBLIC_NAMES]
+    try:
+        names = [name.format(hostname=hostname) for name in _text_list(data, "public_names")] \
+            if "public_names" in data else [name.format(hostname=hostname) for name in DEFAULT_PUBLIC_NAMES]
+    except (KeyError, IndexError, ValueError) as error:
+        raise SettingsError(f"'public_names': only {{hostname}} can be filled in ({error!r})") from error
     try:
         networks = [ipaddress.ip_network(text, strict=False) for text in _text_list(data, "allowed_networks")]
     except ValueError as error:

@@ -59,3 +59,22 @@ class Touch(InstantLeaf):
         ctx.set_field("Note", "touched")
         ctx.set_title("Touched")
         return True
+
+
+class Pick(AsyncLeaf):
+    """A leaf with a choice field; records the option it read when it started."""
+
+    TYPE_NAME = "Pick"
+    fields = {"Choice": ["a", "b"], "Seconds": 0.1}
+    seen: ClassVar[list[str]] = []
+
+    def on_start(self, ctx: LeafContext) -> None:
+        Pick.seen.append(ctx.selection("Choice"))
+        self._timer = ctx.scheduler.call_at(ctx.now() + float(ctx.field("Seconds")), self.succeed)
+
+    def on_cancel(self, ctx: LeafContext) -> None:
+        self._timer.cancel()
+        self.settled()
+
+    def on_end(self, ctx: LeafContext) -> None:
+        self._timer.cancel()

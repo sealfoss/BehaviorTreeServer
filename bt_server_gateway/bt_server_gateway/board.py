@@ -104,7 +104,9 @@ class GatewayBoard:
             OpError: refused; nothing changed.
         """
         self.board.apply_op(op)
-        self._note_declared()
+        entry = op.get("entry") if isinstance(op.get("entry"), dict) else {}
+        renewed = entry.get("id") if op.get("op") == "bb.add" else op.get("id")
+        self._note_declared(renewed if op.get("op") in ("bb.add", "bb.set_source", "bb.retype") else None)
 
     def snapshot(self) -> BlackboardSnapshot:
         return self.board.snapshot()
@@ -113,14 +115,21 @@ class GatewayBoard:
         self.board.restore(snapshot)
         self._note_declared()
 
-    def _note_declared(self) -> None:
-        """Remember the value of each sourced entry the gateway holds: it is what the file keeps."""
+    def declare(self, entry_id: str, value: Any) -> None:
+        """The declared value of a sourced entry added during a run (from the browser's op)."""
+        self.declared[entry_id] = value
+
+    def _note_declared(self, renewed: str | None = None) -> None:
+        """Remember the declared value of each sourced entry: what the file keeps (design 7.4).
+        It is the value the entry had when it got its source (``renewed``: an entry that was
+        just added, given a source or retyped); values fed later never replace it."""
         board = self.board
         with board.lock:
             for entry_id in board.ids():
                 name = board.name_of(entry_id)
                 if name is not None and board.type_of(name) != "Object" and board.source_of(name) is not None:
-                    self.declared[entry_id] = board.get(name)
+                    if entry_id not in self.declared or entry_id == renewed:
+                        self.declared[entry_id] = board.get(name)
                 else:
                     self.declared.pop(entry_id, None)
 
@@ -217,6 +226,8 @@ class GatewayBoard:
             if board.has(name):
                 board.remove(name)
             board.add(name, type_name, value, reset=reset, source=source, id=entry_id)
+            if source is not None and entry_id not in self.declared:
+                self.declared[entry_id] = value
             return
         if board.source_of(current) != source:
             board.set_source(current, source)

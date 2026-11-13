@@ -13,6 +13,8 @@ passes through :func:`bt_server_gateway.security.allow`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import copy
 import hashlib
 import logging
 import os
@@ -34,6 +36,7 @@ from bt_server_core.files import (
     blackboard_file_path,
     document_key,
     atomic_write_bytes,
+    canonical_key,
     check_tree_data,
     find_tree_file,
     parse_blackboard,
@@ -52,7 +55,7 @@ from bt_server_core.values import encode_value, infer_type, loads_json, parse_li
 from .board import GatewayBoard
 from .client import Client
 from .documents import DocumentStore, new_tree_data, write_json
-from .link import CommandRefused, LinkDown, LinkFactory
+from .link import APPLIED, NO_RUN, CommandRefused, LinkDown, LinkFactory
 from .security import allow
 from .session import Reply, Session
 from .settings import Settings
@@ -84,6 +87,7 @@ class Gateway:
         self._tasks: set[asyncio.Task] = set()
         self._checker: asyncio.Task | None = None
         self._memory_failed = False
+        self._changing: list[str] = []  # trees a file command is renaming or replacing right now
 
     # ================================================================== lifecycle
     async def start(self) -> None:
@@ -224,13 +228,75 @@ class Gateway:
                 self._notice_all_error(f"The gateway's state file {name} cannot be written: {error}")
 
     # ================================================================== documents
+    def run_owners(self, key: str) -> list[Session]:
+        """The sessions whose run (starting or going) includes the tree ``key``: its structure is
+        locked (G-04, G-08), and its fields are the executors' (G-05)."""
+        return [session for session in self.sessions.values()
+                if (session.starting or session.result_pending) and key in session.run_keys]
+
     def run_owner(self, key: str) -> Session | None:
-        """The session whose run (starting or going) includes the tree ``key``: its structure is
-        locked (G-04, G-08)."""
-        for session in self.sessions.values():
-            if (session.starting or session.result_pending) and key in session.run_keys:
-                return session
-        return None
+        owners = self.run_owners(key)
+        return owners[0] if owners else None
+
+    def canonical(self, key: str) -> str:
+        """``key`` spelt as the files on disk are (``ROBOT`` finds an open ``robot`` on Windows)."""
+        try:
+            return canonical_key(self.trees_dir, key)
+        except PathError:
+            return key
+
+    def changing_keys(self) -> set[str]:
+        """Trees a file command is renaming or replacing now: Execute waits for it (design 9.2)."""
+        return set(self._changing)
+
+    @contextlib.contextmanager
+    def changing(self, sessions: list[Session | None], keys: list[str | None]):  # noqa: ANN201
+        """While a file command awaits, Execute of these sessions and of runs that would include
+        these trees is refused, so the command cannot replace a tree that has begun to run."""
+        sessions = [session for session in sessions if session is not None]
+        keys = [key for key in keys if key is not None]
+        for session in sessions:
+            session.file_busy += 1
+        self._changing += keys
+        try:
+            yield
+        finally:
+            for session in sessions:
+                session.file_busy -= 1
+            for key in keys:
+                self._changing.remove(key)
+
+    async def forward_edit(self, reply: Reply, document: TreeDocument, op: dict, owners: list[Session],
+                           entry_types: dict[str, str]) -> None:
+        """A field or choice edit of a tree that runs: it goes to every executor whose run holds
+        the tree, and the document follows when it comes back on the details (G-05)."""
+        probe = copy.deepcopy(document)
+        try:
+            probe.apply(op, entry_types=entry_types)
+        except OpRefused as error:
+            reply.no(error.reason)
+            return
+        node_id, field = op["id"], op["field"]
+        if op["op"] == "node.set_selection":
+            sent = {"op": "node.set_selection", "tree": document.key, "id": node_id, "field": field,
+                    "index": op.get("index")}
+        else:
+            sent = {"op": "node.set_field", "tree": document.key, "id": node_id, "field": field,
+                    "value": probe.fields(node_id).get(field)}
+        answers = [await owner.send_edit(dict(sent)) for owner in owners]
+        refused = [message for code, message in answers if code not in (APPLIED, NO_RUN)]
+        if refused:
+            reply.no(refused[0] or "the executor refused the change")
+        elif any(code == APPLIED for code, _ in answers):
+            reply.ok(rev=document.rev)
+        else:  # every run ended meanwhile: the document holds the fields again
+            try:
+                applied = document.apply(op, entry_types=entry_types)
+            except OpRefused as error:
+                reply.no(error.reason)
+                return
+            self.broadcast_op(document.key, applied.op, applied.rev, reply.client.id, reply.cid)
+            reply.ok(rev=applied.rev)
 
     def recipients(self, key: str) -> list[Client]:
         """The browsers that show the document ``key``."""
@@ -267,13 +333,16 @@ class Gateway:
             session.docs.discard(key)
 
     def rename_entry(self, origin: Session, old: str, new: str) -> None:
-        """An entry was renamed: every open document follows (``rename_entry``), except the trees
-        of other sessions, whose blackboards are their own."""
-        others = {session.root for session in self.sessions.values() if session is not origin}
-        for key in self.docs.keys():
-            if key in others:
-                continue
+        """An entry was renamed: the documents of that session follow (``rename_entry``): its
+        tree, the sub-trees opened in it or shown by its browsers, and those its run uses. Other
+        sessions have blackboards of their own (design 3.4)."""
+        keys = {origin.root, *origin.docs, *origin.run_keys}
+        for client in origin.clients():
+            keys |= client.shown
+        for key in sorted(key for key in keys if key is not None):
             document = self.docs.get(key)
+            if document is None:
+                continue
             try:
                 applied = document.rename_entry(old, new, origin.board.types())
             except OpRefused as error:
@@ -284,7 +353,7 @@ class Gateway:
 
     def bundle_reader(self, session: Session, root: str) -> Callable[[str], TreeDocument | None]:
         """Documents for a bundle: open ones as they are in memory, others from disk."""
-        return lambda key: self.docs.read(key, session.catalog)
+        return lambda key: self.docs.read(self.canonical(key), session.catalog)
 
     def read_blackboard_items(self, key: str) -> list[dict]:
         """The blackboard file of a tree run by a Remote Sub-Tree node (file form)."""
@@ -506,7 +575,7 @@ class Gateway:
         if any(part.startswith(".") for part in key.split("/")):
             raise PathError(f"the name {name!r} is reserved")
         self.docs.path(key)  # confined: raises PathError for links leading out
-        return key
+        return canonical_key(self.trees_dir, key)
 
     def root_of(self, key: str) -> Session | None:
         return next((session for session in self.sessions.values() if session.root == key), None)
@@ -578,6 +647,10 @@ class Gateway:
         if choice not in ("save", "discard"):
             reply.no("there are unsaved changes", question={"kind": "unsaved", "docs": unsaved})
             return False
+        running = [key for key in unsaved if self.run_owner(key) is not None]
+        if choice == "discard" and running:
+            reply.no(f"{', '.join(running)} is executing: its changes cannot be discarded until the run ends")
+            return False
         for key in unsaved:
             document = self.docs.get(key)
             if choice == "save":
@@ -629,6 +702,13 @@ class Gateway:
         else:
             document = TreeDocument(new_tree_data(uuid.uuid4().hex), session.catalog, key=key)
             board = GatewayBoard()
+        with self.changing([session], [session.root, key]):
+            await self._replace_root(reply, client, session, action, key, document, board, message)
+
+    async def _replace_root(self, reply: Reply, client: Client, session: Session, action: str, key: str,
+                            document: TreeDocument, board: GatewayBoard, message: dict) -> None:
+        """The awaiting part of New and Load: questions answered, files written, then the swap,
+        checked again after the last await."""
         if not await self._resolve_unsaved(reply, session, message.get("choice")):
             return
         current = self.docs.get(key)
@@ -643,6 +723,9 @@ class Gateway:
             await asyncio.to_thread(write_json, blackboard_file_path(self.trees_dir, key),
                                     {"format": "behavior_tree_widget_blackboard", "version": 1, "blackboard": []})
         await session.board_writer.flush()
+        if session.busy():
+            reply.no(f"{'New' if action == 'new' else 'Load'} is refused while the executor {session.name} is not idle")
+            return
         old_docs = self._session_docs(session)
         self.docs.add(document)
         session.root = key
@@ -706,7 +789,11 @@ class Gateway:
             reply.no(f"the tree {new} exists", question={"kind": "replace", "name": new})
             return
         owner = self.root_of(old)
-        warnings = await self.docs.save(document, view, key=new)
+        with self.changing([owner], [old, new]):
+            warnings = await self.docs.save(document, view, key=new)
+        if self.run_owner(old) is not None or self.docs.get(new) is not None:
+            reply.no("the tree began to execute meanwhile: it was written, but stays open under its old name")
+            return
         recipients = self.recipients(old)
         self.docs.rekey(old, new)
         document.mark_saved()
@@ -750,9 +837,13 @@ class Gateway:
             posixpath.basename(new) + ".json")
         old_board, new_board = blackboard_file_path(self.trees_dir, old), blackboard_file_path(self.trees_dir, new)
         owner = self.root_of(old)
-        if owner is not None:
-            await owner.board_writer.flush()
-        await asyncio.to_thread(_move, source, target, old_board, new_board)
+        with self.changing([owner], [old, new]):
+            if owner is not None:
+                await owner.board_writer.flush()
+            if self.run_owner(old) is not None:
+                reply.no("the tree is executing: it cannot be renamed now")
+                return
+            await asyncio.to_thread(_move, source, target, old_board, new_board)
         document = self.docs.get(old)
         if document is not None:
             recipients = self.recipients(old)
@@ -821,7 +912,7 @@ class Gateway:
                 self.broadcast_op(holder.key, applied.op, applied.rev, client.id, None)
         else:
             try:
-                key = subtree_key(holder.key, current)
+                key = self.canonical(subtree_key(holder.key, current))
             except PathError as error:
                 reply.no(str(error), question={"kind": "choose_file", "node": node_id, "file": str(current)})
                 return
@@ -864,13 +955,11 @@ class Gateway:
 
     async def _recover(self, reply: Reply, client: Client, message: dict) -> None:
         key = self.tree_key(message.get("doc"))
-        if key not in self.docs.recovery_keys:
+        if key not in self.docs.offered:
             reply.no(f"there is nothing to recover for {key}")
             return
         if message.get("accept") is not True:
-            current = self.docs.get(key)
-            if current is None or not current.unsaved:
-                await self.docs.drop_recovery(key)
+            await self.docs.answer_offer(key)
             reply.ok()
             return
         if self.run_owner(key) is not None:
@@ -887,6 +976,7 @@ class Gateway:
         if session.root != key:
             session.docs.add(key)
             client.shown.add(key)
+        await self.docs.answer_offer(key)
         self.docs.changed(document)
         self.doc_event(key, "resync", document, [client])
         reply.ok(doc=key, document=document.to_wire(session.board.types()))
