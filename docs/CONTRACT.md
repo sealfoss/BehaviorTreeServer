@@ -340,6 +340,30 @@ executors                          -> ok {"executors": [...]}
 count from 0 per run. `run.bundle` is sent for a watched executor and for runs the session did
 not start.
 
+### 5.8 Settled by the page (binding for the gateway and the executor)
+
+1. `node.set_field` of `LiteralValue` sends the typed form `{"type", "value"}`.
+2. `paste` (and the clipboard text) carries nodes in **wire form**, marked `"encoding": "wire"`
+   on the op, plus `"sizes": {id: [w, h]}` used for placement; clipboard text in tree-file form
+   (from another page or older data) is converted by the page with the catalog first.
+3. After New, Load or Save As of the root tree the page sends `attach` again and takes the new
+   `snapshot`; the gateway may also push one.
+4. `ask interface {type}` answers `{"interface": {"goal": [F], "result": [F], "feedback": [F]}}`
+   for an action, `{"request": [F], "response": [F]}` for a service, `{"message": [F]}` for a
+   message (section keys case-insensitive; a section may also be `{"fields": [F]}`). `F` is
+   `{"name", "kind", "default"?, "fields"?: [F], "constants"?: [{"name","value"}]}`; `kind`
+   is the ROS type text (`bool`, `int32`, `uint8`, `float64`, `string`, `sequence<float64>`,
+   `geometry_msgs/msg/Pose`, `float64[3]` …); a nested message has `fields`.
+5. `ask graph` items are `[name, type]`; `type` may be a list of types.
+6. Pinned inspector fields live in each browser's localStorage (no op carries them).
+7. After `watch {executor}` the gateway sends that executor's current `run` (with `bundle`)
+   and `st`, then its updates; the watched run's node paths count from its own Root.
+8. The page clears its log pane when a `run` `started` arrives or log numbers restart at 0.
+9. `file zoom_in` carries `path` = the instance path of the Sub-Tree node zoomed through.
+10. Only the first `welcome` of a connection leads to an `attach`; later ones update the
+    executor list.
+11. Cancelling is drawn violet (`#7b4fc4`) with a dashed border.
+
 ## 6. The executor link (design 3.3, 9.1) and the processes
 
 `bt_server_gateway/bt_server_gateway/link.py` [gateway] defines the protocol and data classes;
