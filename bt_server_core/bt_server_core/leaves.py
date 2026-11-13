@@ -12,6 +12,9 @@ Three kinds of leaves, by where their work runs:
   When halted, :meth:`AsyncLeaf.on_cancel` sends the cancel and the leaf calls
   :meth:`AsyncLeaf.settled` once it is confirmed; until then the node shows Cancelling (design
   5.6). :meth:`AsyncLeaf.on_end` is always called last: finished, failed or cancelled.
+  :meth:`AsyncLeaf.cancel_and_fail` gives up while active (a feedback timeout, a lost server):
+  the node shows Cancelling, ``on_cancel`` runs, and it ends Failed with the reason once the
+  cancel is confirmed or times out, as a passed Timeout does.
 * :class:`ThreadLeaf` runs :meth:`ThreadLeaf.run`, a plain function, on a reused daemon worker
   thread. When halted, ``ctx.cancel_requested()`` becomes true and the node shows Cancelling
   until the function returns.
@@ -36,6 +39,7 @@ Leaf objects are made anew for each run. Inside a leaf, ``self.ctx`` is its
 
     ctx.get(name) / ctx.has(name) / ctx.set(name, value)   # the blackboard (ctx.blackboard)
     ctx.fields / ctx.field(name) / ctx.selection(name)     # field values, bindings resolved
+    ctx.bindings / ctx.bound_values()                      # the node's bindings and their values
     ctx.outputs                                            # {source path: entry name}
     ctx.write_output(path, value) / ctx.write_outputs(data)
     ctx.log(level, text) / ctx.detail(kind, value)         # the tree log, the node's details
@@ -53,7 +57,9 @@ commands raise :class:`ExecutionCancelled` in a call that was cancelled.
 
 A field bound to a blackboard entry (``bindings`` of the node, design 6.4) takes the entry's
 value when the leaf starts; a binding to a missing entry, or to a sourced entry without recent
-data, fails the leaf when it starts. ``outputs`` copy values the other way:
+data, fails the leaf when it starts. A Remote Sub-Tree's bindings map remote entries to local
+entries: they are checked when it starts but not applied to its fields; it reads them with
+``ctx.bindings`` and ``ctx.bound_values()``. ``outputs`` copy values the other way:
 :meth:`LeafContext.write_outputs` takes the leaf's data (for example ``{"Result": {...}}``) and
 writes the parts the node's ``outputs`` name to their entries, creating missing ones.
 """
@@ -62,7 +68,8 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ._engine_types import ExecutionCancelled, Status, check_not_cancelled, current_token
@@ -253,6 +260,12 @@ class AsyncLeaf(Leaf):
         """The cancel is confirmed (any thread)."""
         self.ctx._host.leaf_settled()
 
+    def cancel_and_fail(self, reason: str) -> None:
+        """Give up while active (any thread): the node shows Cancelling, :meth:`on_cancel` is
+        called, and once :meth:`settled` is called (or the cancel timeout passes, counted as an
+        unconfirmed cancel) the node ends Failed with ``reason``, as a passed Timeout does."""
+        self.ctx._host.leaf_cancel_and_fail(str(reason))
+
 
 class ThreadLeaf(Leaf):
     """A started leaf whose work is a plain function on a worker thread (see the module docs)."""
@@ -371,6 +384,18 @@ class LeafContext:
         """Change the node's title; it goes out as a ``title`` detail."""
         check_not_cancelled("set_title")
         self._host.set_title(str(title))
+
+    @property
+    def bindings(self) -> Mapping[str, str]:
+        """The node's ``bindings`` as in the file (read-only): field path -> entry name, or for a
+        Remote Sub-Tree remote entry name -> local entry name."""
+        return MappingProxyType(dict(self._host.bindings))
+
+    def bound_values(self) -> dict[str, Any]:
+        """``{binding key: the current value of its entry}``. Raises :class:`LeafFailure` for a
+        missing entry or a sourced entry without recent data. A Remote Sub-Tree's bindings are not
+        applied to its fields; it takes their values from here."""
+        return self._host.bound_values()
 
     # ----------------------------------------------------------------- outputs
     @property

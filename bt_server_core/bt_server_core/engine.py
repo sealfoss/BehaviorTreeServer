@@ -876,7 +876,8 @@ class TreeRunner:
                     raise OpError(f"{name}.{path}: {error}") from error
             with node.lock:
                 node.fields[name] = copy.deepcopy(new)
-                if not any(key.split(".")[0].split("[")[0] == name for key in node.bindings):
+                if not node.binds_fields() or not any(key.split(".")[0].split("[")[0] == name
+                                                      for key in node.bindings):
                     node.values = {**node.values, name: copy.deepcopy(new)}
 
     def _apply_config(self, config: Any) -> None:

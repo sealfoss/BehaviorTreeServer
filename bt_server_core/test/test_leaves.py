@@ -488,3 +488,114 @@ def test_thread_call_from_an_earlier_run_ticks_the_new_run() -> None:
     GATE.set()
     wait(second, lambda: len(calls) == 2)  # started when the old call returned, not at the next periodic tick
     assert calls[1] == 1.5
+
+
+# ------------------------------------------------------------------------- Remote Sub-Tree bindings, cancel_and_fail
+
+
+class FakeRemoteSubTree(AsyncLeaf):
+    """Stands in for the executor's Remote Sub-Tree: records what it sees."""
+
+    fields = {"Executor": "", "File": "dock_BT.json", "Timeout": 0.0, "Watchdog": 5.0}
+
+    def on_start(self, ctx: LeafContext) -> None:
+        EVENTS.append(("seen", dict(ctx.bindings), ctx.bound_values(), ctx.field("File"), ctx.field("Timeout")))
+        self.succeed()
+
+
+def remote_registry() -> Registry:
+    reg = make_registry()
+    reg.register_ros_leaf("RemoteSubTree", FakeRemoteSubTree)
+    return reg
+
+
+def test_remote_sub_tree_bindings_are_entry_to_entry() -> None:
+    entries = [{"name": "dock", "type": "Integer", "value": 3}, {"name": "pose", "type": "List", "value": [1, 2]}]
+    bindings = {"File": "dock", "waypoints[0]": "pose"}
+    run = EngineRun("Seq[R]", entries=entries, registry=remote_registry(),
+                    leaves={"R": {"type": "RemoteSubTree", "bindings": bindings}}).start()
+    assert run.codes() == "S S"
+    assert EVENTS == [("seen", bindings, {"File": 3, "waypoints[0]": [1, 2]}, "dock_BT.json", 0.0)]
+    node = run.runner.node(run.index("R"))
+    with pytest.raises(TypeError):
+        node.ctx.bindings["File"] = "other"  # type: ignore[index]
+
+
+def test_remote_sub_tree_binding_to_a_missing_entry_fails_at_start() -> None:
+    run = EngineRun("Seq[R]", entries=[], registry=remote_registry(),
+                    leaves={"R": {"type": "RemoteSubTree", "bindings": {"dock_id": "nowhere"}}}).start()
+    assert run.codes() == "F F"
+    assert "nowhere" in run.details("R")["error"]
+    assert EVENTS == []
+
+
+def test_bound_values_of_field_bindings() -> None:
+    class Reader(AsyncLeaf):
+        fields = {"Goal": {"x": 0.0}}
+
+        def on_start(self, ctx: LeafContext) -> None:
+            EVENTS.append(("values", ctx.bound_values(), ctx.field("Goal")))
+            self.succeed()
+
+    run = EngineRun("Seq[G]", entries=[{"name": "x", "type": "Double", "value": 2.5}], registry=registry(Reader),
+                    leaves={"G": {"type": "Reader", "bindings": {"Goal.x": "x"}}}).start()
+    assert run.codes() == "S S"
+    assert EVENTS == [("values", {"Goal.x": 2.5}, {"x": 2.5})]
+
+
+class GivesUp(AsyncLeaf):
+    """Gives up at 1 s with "no feedback"; its cancel is confirmed after ``confirm`` s (None: never)."""
+
+    fields = {"confirm": 0.3}
+
+    def on_start(self, ctx: LeafContext) -> None:
+        self._timer = ctx.scheduler.call_at(ctx.now() + 1.0, lambda: self.cancel_and_fail("no feedback"))
+
+    def on_cancel(self, ctx: LeafContext) -> None:
+        EVENTS.append(("cancel", ctx.now()))
+        confirm = self.get("confirm")
+        if confirm is not None:
+            ctx.scheduler.call_at(ctx.now() + confirm, self.settled)
+
+    def on_end(self, ctx: LeafContext) -> None:
+        self._timer.cancel()
+
+
+def test_async_leaf_cancel_and_fail() -> None:
+    run = EngineRun("Seq[G, s]", registry=registry(GivesUp), leaves={"G": {"type": "GivesUp"}}).start()
+    run.at(1)
+    assert run.codes() == "R C -"
+    assert run.details("G")["error"] == "no feedback"
+    assert EVENTS == [("cancel", 1.0)]
+    run.at(1.29)
+    assert run.codes() == "R C -"
+    run.at(1.3)
+    assert run.codes() == "F F -"
+    assert run.result.outcome == Outcome.FAILED
+    assert (1.3, "Node 'G' (GivesUp) finished: Failed (no feedback)") in run.sink.lines()
+
+
+def test_cancel_and_fail_with_an_unconfirmed_cancel() -> None:
+    run = EngineRun("Seq[G]", registry=registry(GivesUp), config={"on_unconfirmed_cancel": "continue"},
+                    leaves={"G": {"type": "GivesUp", "fields": {"confirm": None}}}).start()
+    run.at(6)
+    assert run.codes() == "F F"
+    assert run.result.outcome == Outcome.FAILED
+    assert run.result.unconfirmed_cancels == 1 and run.runner.unsettled == 1
+
+
+def test_cancel_and_fail_from_another_thread_and_once_ended() -> None:
+    class Idle(AsyncLeaf):
+        pass
+
+    run = EngineRun("Seq~[c, I]", registry=registry(Idle), leaves={"I": {"type": "Idle"}},
+                    entries=[{"name": "go", "type": "Bool", "value": True}]).start()
+    leaf = run.runner.node(run.index("I")).leaf
+    worker = threading.Thread(target=leaf.cancel_and_fail, args=("server lost",))
+    worker.start()
+    worker.join()
+    wait(run, lambda: run.result is not None)
+    assert run.codes() == "F S F"
+    assert run.details("I")["error"] == "server lost"
+    leaf.cancel_and_fail("too late")  # no effect once the leaf is no longer active
+    assert run.details("I")["error"] == "server lost"

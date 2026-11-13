@@ -31,6 +31,10 @@ if TYPE_CHECKING:  # pragma: no cover
 RUNNING, SUCCEEDED, FAILED, READY, CANCELLING = (
     Status.RUNNING, Status.SUCCEEDED, Status.FAILED, Status.READY, Status.CANCELLING)
 
+#: Node types whose ``bindings`` map entries to entries (remote entry -> local entry), not field
+#: paths to entries (contract 2.1).
+ENTRY_BINDING_TYPES = frozenset({"RemoteSubTree"})
+
 #: Lifecycle states of a started leaf (design 5.6). UNSETTLED: its cancel timed out and its work
 #: has not settled yet; DONE: it finished in this start.
 IDLE, WAITING, ACTIVE, CANCELLING_STATE, UNSETTLED, DONE = "idle", "waiting", "active", "cancelling", "unsettled", "done"
@@ -264,7 +268,7 @@ class LeafNode(Node):
         self.deadline: Any = None
         self.cancel_timer: Any = None
         self.cancel_generation = 0
-        self.timed_out = False
+        self.fail_after_cancel: str | None = None  # a deadline, or cancel_and_fail(reason)
         self.was_running = False
         self.started = False  # an AsyncLeaf's on_start ran: on_end is due
         self.rerun = False
@@ -365,9 +369,36 @@ class LeafNode(Node):
             return self._tick_instant()
         return self._tick_started()
 
+    def binds_fields(self) -> bool:
+        """True when the node's bindings are field paths; a Remote Sub-Tree's map remote entries
+        to local entries (contract 2.1) and are given to the leaf as they are."""
+        return self.type_name not in ENTRY_BINDING_TYPES
+
+    def bound_values(self) -> dict[str, Any]:
+        """``{binding key: value of its entry}`` (copies). Raises LeafFailure for a missing entry
+        or a sourced entry without recent data, as when the leaf starts."""
+        board = self.run.blackboard
+        values = {}
+        with board.lock:
+            for key, entry in self.bindings.items():
+                if not board.has(entry):
+                    raise LeafFailure(f"the binding of {key} names the missing entry {entry!r}")
+                if board.freshness(entry) in ("nodata", "stale"):
+                    raise LeafFailure(f"the entry {entry!r} bound to {key} has no recent data")
+                values[key] = board.get(entry)
+        return values
+
     def _resolve(self) -> str | None:
         """Take the values of the bound fields from the blackboard; the failure reason, or None."""
         values = copy.deepcopy(self.fields)
+        if not self.binds_fields():
+            try:
+                self.bound_values()  # checked when the leaf starts; the leaf reads them itself
+            except LeafFailure as failure:
+                return str(failure)
+            with self.lock:
+                self.values = values
+            return None
         board = self.run.blackboard
         for path, entry in self.bindings.items():
             try:
@@ -446,7 +477,7 @@ class LeafNode(Node):
         self.state = WAITING
         self.pending = None
         self.reason = None
-        self.timed_out = False
+        self.fail_after_cancel = None
         self.rerun = False
         self.was_running = True
         self.run.waiting[self] = None
@@ -587,11 +618,20 @@ class LeafNode(Node):
 
     def _on_deadline(self) -> None:
         self.deadline = None
+        self.cancel_and_fail("timed out")
+
+    def leaf_cancel_and_fail(self, reason: str) -> None:
+        self.post(lambda: self.cancel_and_fail(reason))
+
+    def cancel_and_fail(self, reason: str) -> None:
+        """An active leaf gives up (a deadline, or the leaf itself): it shows Cancelling, its cancel
+        is sent, and once that is confirmed (or times out) it ends Failed with ``reason``."""
         if self.state != ACTIVE or self.pending is not None:
             return
-        self.run.detail(self.index, "error", "timed out")
-        self.run.log(LogLevel.INFO, f"Node {self.label} timed out: cancelling", self.index)
-        self.timed_out = True
+        self._cancel_deadline()
+        self.run.detail(self.index, "error", reason)
+        self.run.log(LogLevel.INFO, f"Node {self.label} {reason}: cancelling", self.index)
+        self.fail_after_cancel = reason
         self.state = CANCELLING_STATE
         self.run.cancelling_leaves[self] = None
         self.set_status(CANCELLING)
@@ -639,15 +679,15 @@ class LeafNode(Node):
         self.run.cancelling_leaves.pop(self, None)
         self.run.log(LogLevel.INFO, f"Node {self.label} cancel confirmed", self.index)
         self._end(READY)
-        if self.timed_out:
+        if self.fail_after_cancel is not None:
             self.state = DONE
             self.pending = FAILED
-            self.reason = "timed out"
+            self.reason = self.fail_after_cancel
             self.set_status(FAILED)
         else:
             self.state = IDLE
             self.set_status(READY)
-        self.timed_out = False
+        self.fail_after_cancel = None
         self.run.request_tick()
         self.run.progress()
 
@@ -661,13 +701,13 @@ class LeafNode(Node):
         self.run.unconfirmed_cancels += 1
         self.run.log(LogLevel.ERROR, f"Node {self.label}: the cancel was not confirmed within "
                                      f"{self.cancel_timeout():g} s", self.index)
-        if self.timed_out:
+        if self.fail_after_cancel is not None:
             self.pending = FAILED
-            self.reason = "timed out"
+            self.reason = self.fail_after_cancel
             self.set_status(FAILED)
         else:
             self.set_status(READY)
-        self.timed_out = False
+        self.fail_after_cancel = None
         self.run.unconfirmed_cancel()
 
     def _end(self, status: Status) -> None:
@@ -740,7 +780,7 @@ class LeafNode(Node):
                 else:
                     self.send_cancel()
         elif state == CANCELLING_STATE:
-            self.timed_out = False  # halted: its deadline failure no longer matters
+            self.fail_after_cancel = None  # halted: the failure it gave up with no longer matters
         elif state == UNSETTLED:
             self.pending = None
             if self.status != READY:
@@ -755,7 +795,7 @@ class LeafNode(Node):
             self.set_status(READY)
             return
         if self.state == CANCELLING_STATE:
-            self.timed_out = False
+            self.fail_after_cancel = None
             return
         if self.state in (WAITING, ACTIVE):
             self.halt()
