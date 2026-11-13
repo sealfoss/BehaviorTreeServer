@@ -75,7 +75,7 @@ class Listener:
         return next((entry["value"] for entry in self.blackboard.values() if entry["name"] == name), None)
 
 
-async def until(predicate, timeout: float = 10.0):
+async def until(predicate, timeout: float = 20.0):
     deadline = time.monotonic() + timeout
     while True:
         value = predicate()
@@ -129,7 +129,7 @@ async def test_ros_link_execute_statuses_blackboard_apply_stop_and_no_run(factor
     assert snapshot["run"].run_id == run_id and snapshot["status"].state == 1
     assert {entry["name"]: entry["value"] for entry in snapshot["blackboard"]}["count"] == 7
     await link.stop(run_id)
-    assert await until(lambda: listener.results, 10.0)
+    assert await until(lambda: listener.results, 20.0)
     result = listener.results[0]
     assert (result.run_id, result.goal_status, result.outcome) == (run_id, "canceled", 3)
     assert [entry["value"] for entry in result.blackboard if entry["name"] == "count"] == [7]
@@ -177,7 +177,7 @@ async def test_ros_link_repairs_a_gap_in_the_details_with_a_snapshot(factory, st
     await link.start()
     assert await until(lambda: link.online, 20.0)
     run_id = await link.execute(tree(leaf("TestDetails", Count=12, Period=0.15)), [], "rl_gap", "pytest")
-    assert await until(lambda: received[0] >= 12, 10.0)
+    assert await until(lambda: received[0] >= 12, 20.0)
     await asyncio.sleep(1.0)
     snapshot = await link.snapshot()
     assert listener.full_updates >= 2  # the start of the run, and the repair
@@ -239,12 +239,12 @@ async def test_ros_link_entries_carry_source_problems_while_they_last(factory, s
     source = {"topic": f"{executor.ns}_robot/level", "type": "std_msgs/msg/Float64", "field": "nope"}
     blackboard = [{"id": level_id, "name": "level", "type": "Double", "value": 0.0, "source": source}]
     run_id = await link.execute(tree(leaf("TestHold")), blackboard, "rl_problem", "pytest")
-    assert await until(lambda: listener.blackboard.get(level_id, {}).get("problem"), 5.0)
+    assert await until(lambda: listener.blackboard.get(level_id, {}).get("problem"), 20.0)
     snapshot = await link.snapshot()
     assert [entry.get("problem") for entry in snapshot["blackboard"]] == [listener.blackboard[level_id]["problem"]]
     fixed = {**source, "field": "data"}
     assert (await link.apply([{"op": "bb.set_source", "id": level_id, "source": fixed}]))[0] == APPLIED
-    assert await until(lambda: level_id in listener.blackboard and "problem" not in listener.blackboard[level_id], 5.0)
+    assert await until(lambda: level_id in listener.blackboard and "problem" not in listener.blackboard[level_id], 20.0)
     assert all("problem" not in entry for entry in (await link.snapshot())["blackboard"])
     await link.stop(run_id)
     assert await until(lambda: listener.results)
@@ -258,7 +258,7 @@ async def test_ros_link_describe_failure_answers_with_the_reason(factory, start_
     start = time.monotonic()
     with pytest.raises(CommandRefused) as refused:
         await link.describe("interface", {"type": "os/msg/Thing"})
-    assert time.monotonic() - start < 5.0
+    assert time.monotonic() - start < 9.0  # below the link's own 10 s call timeout
     assert str(refused.value)
     await link.close()
 
@@ -286,9 +286,10 @@ async def test_ros_link_repair_reports_updates_newer_than_the_snapshot(factory, 
     await link.apply([{"op": "bb.set_value", "id": count_id, "value": 3}])  # reveals the gap
     await asyncio.sleep(0.25)
     await link.apply([{"op": "bb.set_value", "id": count_id, "value": 4}])  # arrives during the repair
-    await asyncio.sleep(1.2)
-    assert listener.full_updates >= 2
-    assert listener.value("c") == 4
+    assert await until(lambda: listener.full_updates >= 2 and link._held is None)  # the repair is over
+    assert await until(lambda: listener.value("c") == 4)
+    await asyncio.sleep(0.5)
+    assert listener.value("c") == 4  # nothing older came after it
     link.snapshot = original
     await link.stop(run_id)
     await link.close()
@@ -323,7 +324,7 @@ async def test_ros_link_every_field_change_comes_back(factory, start_executor):
     for value in (2.5, 3.5):
         op = {"op": "node.set_field", "tree": "main", "id": node["id"], "field": "Speed", "value": value}
         assert (await link.apply([op]))[0] == APPLIED
-    assert await until(lambda: len([i for i in listener.items if i["kind"] == "field"]) >= 2, 3.0)
+    assert await until(lambda: len([i for i in listener.items if i["kind"] == "field"]) >= 2, 20.0)
     values = [item["value"]["value"] for item in listener.items if item["kind"] == "field"]
     assert values == [2.5, 3.5]
     await link.stop(run_id)
@@ -335,7 +336,7 @@ async def test_ros_link_selection_change_comes_back(factory, start_executor):
     link, listener, node, run_id = await choice_run(factory, start_executor, "rl_selection")
     op = {"op": "node.set_selection", "tree": "main", "id": node["id"], "field": "Mode", "index": 1}
     assert (await link.apply([op]))[0] == APPLIED
-    assert await until(lambda: any(i["kind"] == "field" for i in listener.items), 3.0)
+    assert await until(lambda: any(i["kind"] == "field" for i in listener.items), 20.0)
     detail = next(item for item in listener.items if item["kind"] == "field")
     assert detail["i"] == 1
     assert detail["value"] == {"tree": "main", "id": node["id"], "field": "Mode", "selection": 1}

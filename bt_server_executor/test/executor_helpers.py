@@ -110,6 +110,7 @@ class RosHelper:
         rclpy.init(context=self.context, domain_id=int(DOMAIN_ID))
         self.node = Node(f"bt_test_{os.getpid()}_{next(_counter)}", context=self.context)
         self.group = ReentrantCallbackGroup()
+        self._clients: dict[tuple, Any] = {}
         self.executor = SingleThreadedExecutor(context=self.context)
         self.executor.add_node(self.node)
         self._thread = threading.Thread(target=self.executor.spin, daemon=True)
@@ -130,23 +131,34 @@ class RosHelper:
                 return value
             time.sleep(period)
 
-    def result_of(self, future: Any, timeout: float = 10.0) -> Any:
+    def result_of(self, future: Any, timeout: float = 30.0) -> Any:
         if not self.wait(future.done, timeout):
             raise TimeoutError("no answer in time")
         return future.result()
 
-    def call(self, srv_type: Any, name: str, request: Any, timeout: float = 10.0) -> Any:
-        client = self.node.create_client(srv_type, name, callback_group=self.group)
-        try:
-            if not client.wait_for_service(timeout_sec=timeout):
-                raise TimeoutError(f"service {name} not available")
-            return self.result_of(client.call_async(request), timeout)
-        finally:
-            self.node.destroy_client(client)
+    def call(self, srv_type: Any, name: str, request: Any, timeout: float = 30.0) -> Any:
+        """Call a service (the tests' calls are idempotent). Clients are kept, and a request whose
+        reply does not come within 5 s is sent again: Fast DDS drops the reply to a client the
+        server has not matched yet ("client will not receive response"), which a loaded machine
+        shows on a client's first calls."""
+        client = self._clients.get((srv_type, name))
+        if client is None:
+            client = self.node.create_client(srv_type, name, callback_group=self.group)
+            self._clients[(srv_type, name)] = client
+        deadline = time.monotonic() + timeout
+        if not client.wait_for_service(timeout_sec=timeout):
+            raise TimeoutError(f"service {name} not available")
+        while True:
+            future = client.call_async(request)
+            if self.wait(future.done, min(5.0, max(0.1, deadline - time.monotonic()))):
+                return future.result()
+            client.remove_pending_request(future)
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"no answer from {name} in time")
 
     def action_client(self, ns: str) -> ActionClient:
         client = ActionClient(self.node, ExecuteTree, f"{ns}/bt_executor/execute", callback_group=self.group)
-        if not client.wait_for_server(timeout_sec=20.0):
+        if not client.wait_for_server(timeout_sec=30.0):
             raise TimeoutError(f"{ns}/bt_executor/execute not available")
         return client
 
@@ -160,6 +172,12 @@ class RosHelper:
 
     def record(self, msg_type: Any, topic: str, qos: Any) -> Recorder:
         return Recorder(self, msg_type, topic, qos)
+
+    @staticmethod
+    def cancel(handle: Any) -> None:
+        """Cancel a goal without waiting for the cancel's reply (it may be dropped; see
+        :meth:`call`): the goal's result shows the effect."""
+        handle.cancel_goal_async()
 
     def cancel_by_id(self, action: str, goal_id: bytes) -> Any:
         request = CancelGoal.Request()

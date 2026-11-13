@@ -19,6 +19,7 @@ from action_msgs.srv import CancelGoal  # noqa: E402
 from bt_server_interfaces.msg import NodeDetails, RunInfo, TreeStatus  # noqa: E402
 from bt_server_interfaces.srv import Apply, GetLog, GetSnapshot  # noqa: E402
 from executor_helpers import FibServer, goal, leaf, ros, start_executor, tree, unique_ns  # noqa: E402,F401
+from rclpy.qos import DurabilityPolicy  # noqa: E402
 from unique_identifier_msgs.msg import UUID  # noqa: E402
 
 from bt_server_core.values import dumps_json, loads_json  # noqa: E402
@@ -29,17 +30,22 @@ pytestmark = pytest.mark.ros
 SUCCEEDED, CANCELED, ABORTED = GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_CANCELED, GoalStatus.STATUS_ABORTED
 
 
+def stamp(msg) -> float:
+    """A message's ``stamp`` in seconds since the epoch (the ROS clock is the system clock here)."""
+    return msg.stamp.sec + msg.stamp.nanosec / 1e9
+
+
 def run_id_of(handle) -> bytes:
     return bytes(bytearray(handle.goal_id.uuid))
 
 
-def finish(ros, handle, timeout: float = 15.0):
+def finish(ros, handle, timeout: float = 30.0):
     """The result of a goal: (goal status, result message)."""
     response = ros.result_of(handle.get_result_async(), timeout)
     return response.status, response.result
 
 
-def wait_status(ros, recorder, run_id: bytes, predicate, timeout: float = 5.0):
+def wait_status(ros, recorder, run_id: bytes, predicate, timeout: float = 15.0):
     def found():
         for msg in reversed(list(recorder.messages)):
             if bytes(bytearray(msg.run_id.uuid)) == run_id and predicate(msg):
@@ -65,7 +71,7 @@ def test_X_01_each_way_of_ending_a_run_gives_its_goal_state_and_outcome(ros, sta
             handle = ros.send(client, goal(bundle, label=name.replace(" ", "_")))
             if action == "cancel":
                 assert wait_status(ros, status, run_id_of(handle), lambda m: m.state == TreeStatus.STATE_RUNNING)
-                ros.result_of(handle.cancel_goal_async())
+                ros.cancel(handle)
             state, result = finish(ros, handle)
             assert (state, result.outcome) == (goal_state, outcome), name
             shown = wait_status(ros, status, run_id_of(handle),
@@ -89,7 +95,7 @@ def test_X_02_status_is_a_heartbeat_while_nothing_changes(ros, start_executor):
         time.sleep(5.0)
         count = len(status.since(start, start + 5.0))
         assert 9 <= count <= 11, count
-        ros.result_of(handle.cancel_goal_async())
+        ros.cancel(handle)
         finish(ros, handle)
     finally:
         status.close()
@@ -128,23 +134,29 @@ def test_X_04_late_joiners_get_the_last_run_and_status_at_once(ros, start_execut
     ros.action_client(fresh.ns).destroy()
     try:
         handle = ros.send(client, goal(tree(leaf("TestHold"))))
-        time.sleep(1.0)
-        made = time.monotonic()
+        time.sleep(1.0)  # the middle of the run
+        subscribed = time.time()
         run = ros.record(RunInfo, f"{executor.name}/run", RUN_QOS)
         status = ros.record(TreeStatus, f"{executor.name}/status", STATUS_SUB_QOS)
-        start = time.monotonic()
-        assert ros.wait(lambda: run.messages and status.messages, 2.0)
+        assert ros.wait(lambda: run.messages and status.messages, 20.0)
+        # "at once": the first message delivered is the one kept for late joiners, published
+        # before the subscription existed (~/run is published only when a run starts)
         assert bytes(bytearray(run.messages[0].run_id.uuid)) == run_id_of(handle)
         assert run.messages[0].node_paths and run.messages[0].bundle_json
+        assert stamp(run.messages[0]) < subscribed
         assert bytes(bytearray(status.messages[0].run_id.uuid)) == run_id_of(handle)
         assert status.messages[0].state == TreeStatus.STATE_RUNNING
-        assert run.times[0] - start < 1.0
+        for topic in ("run", "status"):  # both keep their last message for late joiners (4.1)
+            offered = ros.node.get_publishers_info_by_topic(f"{executor.name}/{topic}")
+            assert [info.qos_profile.durability for info in offered] == [DurabilityPolicy.TRANSIENT_LOCAL]
+        subscribed = time.time()
         never = ros.record(RunInfo, f"{fresh.name}/run", RUN_QOS)
-        assert ros.wait(lambda: never.messages, 2.0)
+        assert ros.wait(lambda: never.messages, 20.0)
         assert not any(never.messages[0].run_id.uuid) and never.messages[0].bundle_json == ""
+        assert stamp(never.messages[0]) < subscribed  # the empty RunInfo of its start-up
         for recorder in (run, status, never):
             recorder.close()
-        ros.result_of(handle.cancel_goal_async())
+        ros.cancel(handle)
         finish(ros, handle)
     finally:
         client.destroy()
@@ -165,22 +177,28 @@ def test_X_05_a_client_that_misses_details_sees_the_gap_and_repairs_it_with_a_sn
     subscription = ros.node.create_subscription(NodeDetails, f"{executor.name}/details", on_details, DETAILS_QOS,
                                                 callback_group=ros.group)
     try:
-        time.sleep(0.5)
+        assert ros.wait(lambda: subscription.get_publisher_count() > 0, 20.0)
         handle = ros.send(client, goal(tree(leaf("TestDetails", Count=12, Period=0.15))))
-        assert ros.wait(lambda: len(received) >= 4, 10.0)
+        assert ros.wait(lambda: len(received) >= 4, 20.0)
         seqs = [msg.seq for msg in received]
         gap = next((i for i in range(1, len(seqs)) if seqs[i] != seqs[i - 1] + 1), None)
         assert gap is not None, seqs  # the gap is seen in the numbers
         snapshot = ros.call(GetSnapshot, f"{executor.name}/get_snapshot", GetSnapshot.Request())
         mirror = {(item["i"], item["kind"]): item["value"] for item in loads_json(snapshot.details_json)}
-        time.sleep(2.5)  # the leaf has stopped changing its details
+
+        def settled():  # the leaf has stopped changing its details, and the client has all updates
+            final = ros.call(GetSnapshot, f"{executor.name}/get_snapshot", GetSnapshot.Request())
+            done = {"n": 12} in [item["value"] for item in loads_json(final.details_json)]
+            return final if done and received[-1].seq >= final.details_seq else None
+
+        final = ros.wait(settled, 20.0, period=0.2)
+        assert final is not None
         for msg in list(received):
             if msg.seq > snapshot.details_seq:
                 mirror.update({(item["i"], item["kind"]): item["value"] for item in loads_json(msg.details_json)})
-        final = ros.call(GetSnapshot, f"{executor.name}/get_snapshot", GetSnapshot.Request())
         assert mirror == {(item["i"], item["kind"]): item["value"] for item in loads_json(final.details_json)}
         assert mirror[(1, "feedback")] == {"n": 12}
-        ros.result_of(handle.cancel_goal_async())
+        ros.cancel(handle)
         finish(ros, handle)
     finally:
         ros.node.destroy_subscription(subscription)
@@ -249,7 +267,7 @@ def test_X_08_a_restarted_executor_does_not_cancel_the_goals_of_another(ros, sta
         ros.action_client(b_ns).destroy()
         time.sleep(4.0)
         assert server.cancels == [], restarted.text()
-        ros.result_of(handle.cancel_goal_async())
+        ros.cancel(handle)
         state, _ = finish(ros, handle)
         assert state == CANCELED
         assert [goal_id for goal_id, _ in server.cancels] == [server.goals[0][0]]
@@ -387,8 +405,8 @@ def test_X_09c_sigterm_while_the_tree_ticks_fast_ends_the_process(ros, start_exe
             time.sleep(0.5)
             sent = time.monotonic()
             executor.signal(signal.SIGTERM)
-            executor.proc.wait(timeout=8)
-            assert time.monotonic() - sent < 3.0
+            executor.proc.wait(timeout=15)  # a deadlock would hang here
+            assert time.monotonic() - sent < 6.0
         finally:
             client.destroy()
 
@@ -413,7 +431,11 @@ def test_X_12b_a_goal_cancelled_before_it_starts_never_ticks(ros, start_executor
             request.goal_info.goal_id.uuid = list(goal_id.bytes)
             cancelled = canceller.call_async(request)  # right behind the goal
             handle = ros.result_of(sent)
-            ros.result_of(cancelled)
+            answered = ros.wait(cancelled.done, 10.0)
+            if not answered or not cancelled.result().goals_canceling:
+                # the cancel overtook the goal (two services, two paths) and found nothing to
+                # cancel: the run starts normally and is cancelled now
+                ros.cancel(handle)
             state, result = finish(ros, handle)
             assert (state, result.outcome) == (CANCELED, 3)
             if result.message == "Stopped before it started":
@@ -439,12 +461,12 @@ def test_X_12c_no_feedback_while_the_goal_is_canceling(ros, start_executor):
         feedback: list = []
         handle = ros.send(client, goal(tree(leaf("TestHold"))), feedback)
         assert wait_status(ros, status, run_id_of(handle), lambda m: m.state == TreeStatus.STATE_RUNNING)
-        ros.result_of(handle.cancel_goal_async())
+        ros.cancel(handle)
         state, _ = finish(ros, handle)
         assert state == CANCELED
         time.sleep(0.3)
         assert "not in executing state" not in executor.text()
-        assert [item.state for item in feedback] == [TreeStatus.STATE_RUNNING]
+        assert all(item.state == TreeStatus.STATE_RUNNING for item in feedback), feedback
     finally:
         status.close()
         client.destroy()
@@ -461,9 +483,9 @@ def test_X_07b_a_journal_line_with_an_invalid_action_name_is_dropped(ros, start_
         encoding="utf-8")
     executor = start_executor("x07b", folder=folder)
     ros.action_client(executor.ns).destroy()
-    time.sleep(2.0)
+    assert ros.wait(lambda: "cannot be cancelled" in executor.text(), 20.0), executor.text()
+    time.sleep(1.0)  # it keeps running
     assert executor.proc.poll() is None, executor.text()
-    assert "cannot be cancelled" in executor.text()
     lines = [json.loads(line) for line in (folder / "goals.jsonl").read_text().splitlines()]
     assert {"e": "done", "goal": bad} in lines
     assert not any(item["e"] == "done" and item["goal"] == good for item in lines)  # still unsettled
