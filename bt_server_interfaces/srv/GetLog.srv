@@ -1,0 +1,6 @@
+unique_identifier_msgs/UUID run_id     # all zero: the current or last run
+uint64 from_seq
+uint32 max_records
+---
+LogRecord[] records
+uint64 next_seq                        # equal to from_seq + the number returned; the end is reached when nothing comes back

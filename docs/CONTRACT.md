@@ -337,7 +337,77 @@ executors                          -> ok {"executors": [...]}
 count from 0 per run. `run.bundle` is sent for a watched executor and for runs the session did
 not start.
 
-### 5.7 HTTP
+## 6. The executor link (design 3.3, 9.1) and the processes
+
+`bt_server_gateway/bt_server_gateway/link.py` [gateway] defines the protocol and data classes;
+`local_link.py` [gateway] and `ros_link.py` [executor] implement it. All methods run on the
+gateway's asyncio loop; listener callbacks are called on that loop.
+
+```python
+@dataclass
+class LinkRun:            # RunInfo
+    run_id: str | None    # 32 hex digits; None: nothing loaded
+    label: str; requested_by: str; bundle: dict | None; node_paths: list[str]
+@dataclass
+class LinkStatus:         # TreeStatus
+    run_id: str | None; seq: int; state: int; loop: int; cancelling: int; unsettled: int
+    outcome: int; message: str; statuses: bytes
+@dataclass
+class LinkRecord:         # LogRecord, numbered
+    seq: int; stamp: float; level: int; node_index: int; text: str
+@dataclass
+class LinkResult:         # the ExecuteTree result
+    run_id: str; outcome: int; message: str; loops_completed: int; unconfirmed_cancels: int
+    blackboard: list[dict]                 # file encoding, decoded (values are Python values), each with "id"
+    goal_status: str                       # "succeeded" | "aborted" | "canceled"
+class GoalRejected(Exception): ...         # str(e) is the reason (busy: names who started the run)
+class CommandRefused(Exception): ...
+class LinkDown(Exception): ...             # the executor is not reachable
+class RunListener(Protocol):
+    def on_online(self, online: bool) -> None: ...
+    def on_run(self, run: LinkRun) -> None: ...
+    def on_status(self, status: LinkStatus) -> None: ...
+    def on_blackboard(self, run_id: str, seq: int, full: bool, update: dict) -> None: ...   # values decoded
+    def on_details(self, run_id: str, seq: int, details: list[dict]) -> None: ...
+    def on_log(self, run_id: str, records: list[LinkRecord]) -> None: ...
+    def on_result(self, result: LinkResult) -> None: ...
+    def on_catalog(self, types: list[dict]) -> None: ...
+class ExecutorLink(Protocol):
+    name: str                                         # "/cell1/bt_executor"; LocalLink: "local"
+    online: bool
+    async def start(self) -> None: ...
+    async def close(self) -> None: ...
+    async def describe(self, kind: str, arg: dict) -> dict: ...         # node_types | graph | interface | sample
+    async def validate(self, bundle: dict, blackboard: list[dict]) -> list[dict]: ...
+    async def execute(self, bundle: dict, blackboard: list[dict], label: str, requested_by: str) -> str: ...
+        # returns the run id once the goal is accepted; raises GoalRejected
+    async def stop(self, run_id: str) -> None: ...   # through ~/execute/_action/cancel_goal, by id (4.5)
+    async def pause(self, paused: bool) -> None: ...  # raises CommandRefused
+    async def reset(self) -> None: ...
+    async def apply(self, ops: list[dict]) -> tuple[int, str]: ...      # (APPLIED 0 | NO_RUN 1 | REJECTED 2, message)
+    async def snapshot(self) -> dict: ...  # {"run": LinkRun, "status": LinkStatus, "blackboard_seq", "blackboard": [...],
+                                           #  "details_seq", "details": [...], "log_seq"}
+    async def get_log(self, run_id: str | None, from_seq: int, max_records: int) -> list[LinkRecord]: ...
+    def subscribe(self, listener: RunListener) -> None: ...
+```
+
+Ops sent through `apply` carry values already decoded to Python values except that, over
+ROS, `ops_json` uses the file encoding (`encode_value` + `dumps_json`); `RosLink` and the
+executor convert. `blackboard` lists are entries in file form with `"id"`.
+
+**Processes and entry points** (the systemd units and `run.sh` use exactly these):
+
+* Executor: `python -m bt_server_executor [--ros-args ...]` and the console script
+  `executor` (`ros2 run bt_server_executor executor`). Parameters of design 8.1.
+  `ros2 run bt_server_executor run_tree <tree file> [--executor /cell1/bt_executor]`.
+* Gateway: `python -m bt_server_gateway --config <gateway.toml>` and the console script
+  `gateway`. Settings of design 9.1, plus `local_log_dir` (LocalLink's tree logs; default
+  `<trees_dir>/.logs`), `leaf_modules` (LocalLink), `state_dir` (catalog cache, session
+  memory; default `<trees_dir>/.gateway`), `ros_domain_id` is not a setting (environment).
+  `Host` and `Origin` checks compare host names case-insensitively (browsers send them in
+  lower case: `bt.mother-brain.local`).
+
+## 7. HTTP (section 5.7 in earlier copies)
 
 `GET /` (index.html, `Cache-Control: no-cache`), `GET /assets/<hashed>` (one year),
 `GET /ws`, `POST /upload` (multipart: `file` fields, `dir`; 10 MB), `GET /download/<tree key>`

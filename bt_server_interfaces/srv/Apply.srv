@@ -1,0 +1,8 @@
+string ops_json                        # [{"op": "bb.set_value", ...}, {"op": "doc.set_config", ...},
+                                       #  {"op": "node.set_field", "tree": "<key>", "id": "<node id>", ...}]
+---
+uint8 APPLIED  = 0
+uint8 NO_RUN   = 1                     # no run is active: the caller holds the blackboard and applies the change itself
+uint8 REJECTED = 2
+uint8  result
+string message

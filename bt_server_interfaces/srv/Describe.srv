@@ -1,0 +1,5 @@
+string kind                            # "node_types" | "graph" | "interface" | "sample"
+string arg_json                        # e.g. {"type": "nav2_msgs/action/NavigateToPose"}
+---
+bool   ok
+string result_json

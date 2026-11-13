@@ -1,0 +1,22 @@
+# Runs a bundle (design 4.3). Cancelling the goal is Stop.
+string  bundle_json           # the tree and its sub-trees
+string  blackboard_json       # entries in the form of the blackboard file, each with an "id"; "" for none
+string  label                 # the name of the tree, for logs and observers
+string  requested_by          # who asked: a browser address, "command line", an executor name
+string  watchdog_topic        # "" for none; otherwise the TreeStatus topic of the run that started this one
+unique_identifier_msgs/UUID watchdog_run_id   # the id of that run
+float32 watchdog_timeout_s    # stop when the topic has not shown that run as going for this long
+---
+uint8 OUTCOME_SUCCEEDED = 1   # the Root succeeded                  (goal succeeded)
+uint8 OUTCOME_FAILED    = 2   # the Root failed                     (goal aborted)
+uint8 OUTCOME_STOPPED   = 3   # Stop                                (goal canceled)
+                              # a Stop node, or a silent watchdog   (goal aborted)
+uint8 OUTCOME_ERROR     = 4   # the tick failed                     (goal aborted)
+uint8  outcome
+string message
+uint32 loops_completed
+uint32 unconfirmed_cancels
+string blackboard_json        # the final values
+---
+uint8  state                  # as TreeStatus.state
+uint32 loop_count

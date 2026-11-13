@@ -1,0 +1,8 @@
+---
+RunInfo    run
+TreeStatus status
+uint64     blackboard_seq
+string     blackboard_json
+uint64     details_seq
+string     details_json
+uint64     log_seq                     # the number of the latest log record; the records come from GetLog

@@ -1,0 +1,5 @@
+string bundle_json
+string blackboard_json
+---
+bool   ok                              # false: the bundle could not be read at all
+string findings_json                   # [{"path": "...", "severity": "error" | "warning", "text": "..."}]
