@@ -4,7 +4,7 @@ import sys
 import uuid
 from pathlib import Path
 
-REPO = Path(r"C:\repos\BehaviorTreeServer")
+REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "bt_server_core"))
 
 from bt_server_core import files  # noqa: E402
