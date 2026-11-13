@@ -16,6 +16,7 @@ from engine_helpers import EngineRun, make_registry
 from bt_server_core.compat import ExecutionCancelled, LeafNodeWidget, NodeStatus, Status
 from bt_server_core.engine import Outcome, State
 from bt_server_core.leaves import AsyncLeaf, InstantLeaf, LeafContext, LeafFailure, ThreadLeaf, split_path
+from bt_server_core.blackboard import OpError
 from bt_server_core.registry import Registry, RegistryError
 
 # ------------------------------------------------------------------------- leaf classes used below
@@ -599,3 +600,27 @@ def test_cancel_and_fail_from_another_thread_and_once_ended() -> None:
     assert run.details("I")["error"] == "server lost"
     leaf.cancel_and_fail("too late")  # no effect once the leaf is no longer active
     assert run.details("I")["error"] == "server lost"
+
+
+def test_apply_set_selection_during_a_run() -> None:
+    class Chooser(InstantLeaf):
+        fields = {"mode": ["walk", "run", "crawl"], "speed": 1}
+
+        def tick(self, ctx: LeafContext) -> Any:
+            EVENTS.append(("mode", ctx.selection("mode")))
+            return False
+
+    run = EngineRun("Seq~[M, W]", registry=registry(Chooser), leaves={"M": {"type": "Chooser"}},
+                    options={"M": {"field_selections": {"mode": 1}}})
+    run.runner.config["repeat"] = True
+    run.start()
+    node_id = run.runner.node(run.index("M")).node_id
+    run.runner.apply([{"op": "node.set_selection", "tree": "main", "id": node_id, "field": "mode", "index": 2}])
+    run.at(1)
+    assert EVENTS == [("mode", "run"), ("mode", "crawl")]
+    for bad in ({"id": "nope", "field": "mode", "index": 0}, {"id": node_id, "field": "speed", "index": 0},
+                {"id": node_id, "field": "missing", "index": 0}, {"id": node_id, "field": "mode", "index": 3},
+                {"id": node_id, "field": "mode", "index": True}):
+        with pytest.raises(OpError):
+            run.runner.apply([{"op": "node.set_selection", "tree": "main", **bad}])
+    assert run.runner.node(run.index("M")).selections == {"mode": 2}

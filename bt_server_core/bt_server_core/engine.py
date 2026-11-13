@@ -840,7 +840,8 @@ class TreeRunner:
     # ----------------------------------------------------------------- changes during a run
     def apply(self, ops: list[dict]) -> None:
         """Apply operations during a run (contract 3): ``bb.*`` (as :meth:`Blackboard.apply_op`),
-        ``node.set_field`` (``tree``, ``id``, ``field``, ``value``, optional ``path``) and
+        ``node.set_field`` (``tree``, ``id``, ``field``, ``value``, optional ``path``),
+        ``node.set_selection`` (``tree``, ``id``, ``field``, ``index``) and
         ``doc.set_config`` (``config``: the root tree's options). Values are Python values.
         Raises :class:`OpError` at the first refused operation (earlier ones stay applied)."""
         with self._entry():
@@ -852,10 +853,34 @@ class TreeRunner:
                     self.blackboard.apply_op(op)
                 elif kind == "node.set_field":
                     self._apply_set_field(op)
+                elif kind == "node.set_selection":
+                    self._apply_set_selection(op)
                 elif kind == "doc.set_config":
                     self._apply_config(op.get("config"))
                 else:
                     raise OpError(f"the operation {kind!r} cannot be applied during a run")
+
+    def _targets(self, op: dict) -> list[LeafNode]:
+        """Every leaf of the run made from the node ``op`` names (``tree``, ``id``)."""
+        tree, node_id = op.get("tree"), op.get("id")
+        targets = [node for node in self._nodes if isinstance(node, LeafNode) and node.node_id == node_id
+                   and (tree is None or node.tree_key == tree)]
+        if not targets:
+            raise OpError(f"no running leaf has the id {node_id!r} in the tree {tree!r}")
+        return targets
+
+    def _apply_set_selection(self, op: dict) -> None:
+        """Choose another option of a choice field; a leaf that starts afterwards uses it."""
+        name, index = op.get("field"), op.get("index")
+        targets = self._targets(op)
+        for node in targets:
+            options = node.fields.get(name) if isinstance(name, str) else None
+            if not isinstance(options, list):
+                raise OpError(f"{name!r} is not a choice field of {node.title!r}")
+            if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(options):
+                raise OpError(f"the index {index!r} is not one of the {len(options)} options of {name!r}")
+        for node in targets:
+            node.set_selection(name, index)
 
     def _apply_set_field(self, op: dict) -> None:
         tree, node_id, name = op.get("tree"), op.get("id"), op.get("field")
