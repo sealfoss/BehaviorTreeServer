@@ -30,6 +30,10 @@ it, design 7.4); ``apply``
 encodes the values of its operations into the file encoding for ``ops_json``, and ``execute``
 and ``validate`` send ``blackboard`` lists as they are (file form, encoded values).
 
+**Requests** wait briefly for a service that is not ready yet, and idempotent ones (everything
+but ``apply`` and the goal) are sent again when no reply comes within ATTEMPT_S, because Fast DDS
+drops the reply to a client the server has not matched yet.
+
 **Stop** is a call of ``~/execute/_action/cancel_goal`` with the run id: it works for runs this
 gateway did not start and after a restart of the gateway (4.5, X-12).
 """
@@ -84,6 +88,17 @@ LOST_AFTER_S = 1.5
 DISCOVERY_PERIOD_S = 1.0
 #: How long a service call or a goal reply may take.
 CALL_TIMEOUT_S = 10.0
+#: An idempotent request whose reply has not come within this time is sent again (within
+#: CALL_TIMEOUT_S): Fast DDS drops the reply to a client the server has not matched yet
+#: ("client will not receive response"), which happens on the first requests to an executor
+#: that was just found or just restarted, and on a loaded machine.
+ATTEMPT_S = 2.5
+#: How long a request waits for a service that is not ready yet (an executor just found).
+READY_WAIT_S = 2.0
+#: The requests that may be sent twice: asking again, pausing a paused tree, resetting a tree
+#: that is restarting and cancelling a cancelled goal change nothing. ``apply`` is not among
+#: them (its blackboard operations are not idempotent), nor is the goal of ``execute``.
+_IDEMPOTENT = frozenset({"snapshot", "get_log", "describe", "validate", "pause", "reset", "cancel"})
 #: Records asked for per ``~/get_log`` call when a gap is filled.
 _LOG_PAGE = 1000
 _GOAL_STATUS = {GoalStatus.STATUS_SUCCEEDED: "succeeded", GoalStatus.STATUS_CANCELED: "canceled",
@@ -523,16 +538,39 @@ class RosLink:
         return records
 
     # ----------------------------------------------------------------- calls
-    async def _call(self, key: str, request: Any, timeout: float = CALL_TIMEOUT_S) -> Any:
+    async def _call(self, key: str, request: Any) -> Any:
+        """Send ``request`` to the service ``key`` and return the reply. Waits up to
+        READY_WAIT_S for a service that is not ready yet; sends an idempotent request again when
+        its reply has not come within ATTEMPT_S; raises LinkDown when there is no reply within
+        CALL_TIMEOUT_S."""
         client = self._clients.get(key)
         if client is None:
             raise LinkDown(f"the link to {self.name} is not started")
-        if not client.service_is_ready():
-            raise LinkDown(f"the executor {self.name} does not answer ({key})")
-        try:
-            return await asyncio.wait_for(self._ros.call(lambda: client.call_async(request)), timeout)
-        except TimeoutError as error:
-            raise LinkDown(f"the executor {self.name} did not answer in time ({key})") from error
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CALL_TIMEOUT_S
+        ready_by = loop.time() + READY_WAIT_S
+        while not client.service_is_ready():
+            if loop.time() >= ready_by:
+                raise LinkDown(f"the executor {self.name} does not answer ({key})")
+            await asyncio.sleep(0.05)
+        while True:
+            remaining = deadline - loop.time()
+            attempt = min(ATTEMPT_S, remaining) if key in _IDEMPOTENT else remaining
+            sent: list[Any] = []
+
+            def send() -> Any:
+                future = client.call_async(request)
+                sent.append(future)
+                return future
+
+            try:
+                return await asyncio.wait_for(self._ros.call(send), max(attempt, 0.01))
+            except TimeoutError as error:
+                if sent:  # its late reply, if any, is not wanted any more
+                    self._ros.submit(lambda: client.remove_pending_request(sent[0]))
+                if key not in _IDEMPOTENT or loop.time() >= deadline - 0.05:
+                    raise LinkDown(f"the executor {self.name} did not answer in time ({key})") from error
+                log.info("%s: no reply to %s within %.1f s; asking again", self.name, key, attempt)
 
     async def describe(self, kind: str, arg: dict) -> dict:
         response = await self._call("describe", Describe.Request(kind=kind, arg_json=dumps_json(arg, indent=None)))

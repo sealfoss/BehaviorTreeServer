@@ -16,7 +16,7 @@ pytest.importorskip("bt_server_interfaces")
 from executor_helpers import child_env, goal, leaf, new_id, ros, start_executor, tree  # noqa: E402,F401
 
 from bt_server_core.files import write_tree_file  # noqa: E402
-from bt_server_gateway.link import APPLIED, NO_RUN, CommandRefused, GoalRejected, LinkStatus  # noqa: E402
+from bt_server_gateway.link import APPLIED, NO_RUN, CommandRefused, GoalRejected, LinkDown, LinkStatus  # noqa: E402
 from bt_server_gateway.ros_link import RosLinkFactory  # noqa: E402
 from bt_server_gateway.settings import Settings  # noqa: E402
 
@@ -344,3 +344,69 @@ async def test_ros_link_selection_change_comes_back(factory, start_executor):
     assert (await link.apply([bad]))[0] == 2  # REJECTED
     await link.stop(run_id)
     await link.close()
+
+
+class DroppingClient:
+    """Wraps a service client of a link: the replies to the first ``drops`` requests are lost (the
+    request reaches the executor; the link never hears back), as Fast DDS does for a client the
+    server has not matched yet."""
+
+    def __init__(self, client, drops: int = 1) -> None:
+        self.client = client
+        self.drops = drops
+        self.sent = 0
+
+    def service_is_ready(self) -> bool:
+        return self.client.service_is_ready()
+
+    def call_async(self, request):
+        from rclpy.task import Future
+
+        self.sent += 1
+        future = self.client.call_async(request)
+        if self.drops <= 0:
+            return future
+        self.drops -= 1
+        self.client.remove_pending_request(future)
+        return Future()  # never completes
+
+    def remove_pending_request(self, future) -> None:
+        try:
+            self.client.remove_pending_request(future)
+        except Exception:  # noqa: BLE001 - our own never-completing future
+            pass
+
+
+async def test_ros_link_asks_again_when_a_reply_is_lost_but_never_repeats_apply(factory, start_executor, monkeypatch):
+    """Idempotent requests are sent again after ATTEMPT_S without a reply; apply is sent once."""
+    from bt_server_gateway import ros_link
+
+    executor = start_executor("rl_retry")
+    link, listener = await started_link(factory, executor.name)
+    originals = dict(link._clients)
+    try:
+        link._clients["snapshot"] = dropping = DroppingClient(originals["snapshot"])
+        start = time.monotonic()
+        snapshot = await link.snapshot()
+        assert snapshot["run"].run_id is None and dropping.sent == 2
+        assert ros_link.ATTEMPT_S <= time.monotonic() - start < ros_link.CALL_TIMEOUT_S
+
+        count_id = new_id()
+        run_id = await link.execute(tree(leaf("TestHold")), [{"id": count_id, "name": "n", "type": "Integer", "value": 0}],
+                                    "rl_retry", "pytest")
+        assert await until(lambda: listener.statuses and listener.statuses[-1].state == 1)
+        monkeypatch.setattr(ros_link, "CALL_TIMEOUT_S", 4.0)
+        link._clients["apply"] = dropping = DroppingClient(originals["apply"])
+        add = {"op": "bb.add", "entry": {"id": new_id(), "name": "added", "type": "Integer", "value": 1, "reset": False}}
+        with pytest.raises(LinkDown):
+            await link.apply([add])
+        assert dropping.sent == 1  # not repeated: a second bb.add would be refused
+        assert await until(lambda: listener.value("added") == 1)  # it was applied once
+
+        link._clients["cancel"] = dropping = DroppingClient(originals["cancel"])
+        await link.stop(run_id)  # the cancel used by Stop is asked again
+        assert dropping.sent == 2
+        assert await until(lambda: listener.results and listener.results[0].goal_status == "canceled")
+    finally:
+        link._clients.update(originals)
+        await link.close()
