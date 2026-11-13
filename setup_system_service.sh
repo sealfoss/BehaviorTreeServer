@@ -57,12 +57,15 @@ say() { printf '\n==> %s\n' "$*"; }
 die() { printf 'setup_system_service.sh: %s\n' "$*" >&2; exit 1; }
 
 if [ "$(id -u)" = 0 ]; then
+    # Run as root (for example with sudo), the build is made by root too.
     SUDO=()
-    BUILD_USER="${SUDO_USER:-root}"
+    BUILD_USER="root"
 else
-    SUDO=(sudo)
+    # sudo prompts on the terminal; for an unattended run, point SUDO_ASKPASS at a program that
+    # prints the password and it is used instead (sudo -A).
+    if [ -n "${SUDO_ASKPASS:-}" ]; then SUDO=(sudo -A); else SUDO=(sudo); fi
     BUILD_USER="$(id -un)"
-    sudo -v || die "this script needs sudo"
+    "${SUDO[@]}" -v || die "this script needs sudo"
 fi
 command -v systemctl >/dev/null || die "systemd is required"
 [[ "$NAMESPACE" =~ ^[A-Za-z][A-Za-z0-9_]*$ ]] || die "the namespace must be a ROS name part: letters, digits, _"
@@ -78,11 +81,7 @@ if [ "$SKIP_BUILD" = 0 ]; then
     say "Building into $PREFIX (as $BUILD_USER)"
     "${SUDO[@]}" mkdir -p "$PREFIX"
     "${SUDO[@]}" chown "$BUILD_USER": "$PREFIX"
-    if [ "$(id -un)" = "$BUILD_USER" ]; then
-        "$REPO/install.sh" --prefix "$PREFIX" --service
-    else
-        sudo -u "$BUILD_USER" "$REPO/install.sh" --prefix "$PREFIX" --service
-    fi
+    "$REPO/install.sh" --prefix "$PREFIX" --service
 fi
 [ -r "$PREFIX/install/setup.bash" ] || die "no build in $PREFIX/install"
 [ -x "$PREFIX/venv/bin/python" ] || die "no Python environment in $PREFIX/venv"
@@ -142,7 +141,7 @@ done
 "${SUDO[@]}" systemctl daemon-reload
 
 # ---------------------------------------------------------------------------- firewall
-if command -v ufw >/dev/null && "${SUDO[@]}" ufw status 2>/dev/null | grep -q "Status: active"; then
+if command -v ufw >/dev/null && [ -n "$("${SUDO[@]}" ufw status 2>/dev/null | sed -n '/Status: active/p')" ]; then
     interface="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p')"
     say "ufw is active: allowing port $PORT/tcp and mDNS (5353/udp) on $interface"
     "${SUDO[@]}" ufw allow in on "$interface" to any port "$PORT" proto tcp

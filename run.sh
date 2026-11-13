@@ -57,18 +57,22 @@ source "$VENV/bin/activate"
 set -u
 export ROS_DOMAIN_ID="$DOMAIN"
 
+# Each process runs in a session of its own (setsid), so that Ctrl+C reaches only this script,
+# which then stops each process with exactly one SIGTERM: a second signal makes the executor
+# exit at once instead of waiting for its cancels (design 8.2). SIGTERM, not SIGINT, because
+# a background command of a script starts with SIGINT ignored.
 pids=()
 stop_all() {
-    trap - INT TERM
-    for pid in "${pids[@]}"; do kill -INT "$pid" 2>/dev/null || true; done
+    trap - INT TERM HUP
+    for pid in "${pids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
     for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
 }
-trap 'stop_all; exit 0' INT TERM
+trap 'stop_all; exit 0' INT TERM HUP
 
-python -m bt_server_executor --ros-args -r "__ns:=/$NAMESPACE" -r __node:=bt_executor \
+setsid python -m bt_server_executor --ros-args -r "__ns:=/$NAMESPACE" -r __node:=bt_executor \
     --params-file "$CONFIG_DIR/executor.yaml" &
 pids+=("$!")
-python -m bt_server_gateway --config "$CONFIG_DIR/gateway.toml" &
+setsid python -m bt_server_gateway --config "$CONFIG_DIR/gateway.toml" &
 pids+=("$!")
 
 host="$(sed -n 's/^http_host *= *"\(.*\)"/\1/p' "$CONFIG_DIR/gateway.toml")"

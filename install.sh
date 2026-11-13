@@ -77,10 +77,18 @@ for package in "${PACKAGES[@]}"; do
     [ -f "$REPO/$package/package.xml" ] || die "$REPO/$package/package.xml missing: run this script from the repository"
 done
 
-if [ "$(id -u)" = 0 ]; then SUDO=(); else SUDO=(sudo); fi
+# sudo prompts on the terminal; for an unattended run, point SUDO_ASKPASS at a program that prints
+# the password and it is used instead (sudo -A).
+if [ "$(id -u)" = 0 ]; then
+    SUDO=()
+elif [ -n "${SUDO_ASKPASS:-}" ]; then
+    SUDO=(sudo -A)
+else
+    SUDO=(sudo)
+fi
 
 # --------------------------------------------------------------------------- system packages
-is_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"; }
+is_installed() { [ "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null)" = "install ok installed" ]; }
 
 apt_install() {
     local missing=()
@@ -116,7 +124,8 @@ add_ros_repository() {
 
 if [ "$SKIP_APT" = 0 ]; then
     say "Checking system packages"
-    if ! apt-cache policy python3-aiohttp 2>/dev/null | grep -q Candidate; then
+    # (no "grep -q" in a pipeline: with pipefail, apt-cache's SIGPIPE would count as a failure)
+    if [ -z "$(apt-cache policy python3-aiohttp 2>/dev/null | sed -n '/Candidate/p')" ]; then
         "${SUDO[@]}" apt-get update
     fi
 fi
@@ -132,9 +141,10 @@ if [ "$SKIP_TESTS" = 0 ]; then
 fi
 [ -r "$ROS_SETUP" ] || die "$ROS_SETUP missing after the installation"
 
-# rosdep resolves the dependencies declared in the package.xml files (design 14.1). Everything
-# it would install is already installed above, so a failure here (no network to GitHub) is
-# only reported.
+# rosdep resolves the dependencies declared in the package.xml files (design 14.1) to apt
+# packages, which are installed like the ones above (rosdep's own "install" calls sudo itself,
+# which an unattended run cannot answer). Everything known is already installed above, so a
+# failure here (no network to GitHub) is only reported.
 if [ "$SKIP_APT" = 0 ]; then
     say "Checking package.xml dependencies with rosdep"
     if [ ! -e /etc/ros/rosdep/sources.list.d/20-default.list ]; then
@@ -143,8 +153,25 @@ if [ "$SKIP_APT" = 0 ]; then
     if rosdep update --rosdistro "$ROS_DISTRO_NAME" >/dev/null 2>&1; then
         paths=()
         for package in "${PACKAGES[@]}"; do paths+=("$REPO/$package"); done
-        rosdep install --from-paths "${paths[@]}" --ignore-src -y --rosdistro "$ROS_DISTRO_NAME" \
-            || echo "install.sh: warning: rosdep install reported problems (see above)" >&2
+        needed=()
+        unresolved=()
+        for key in $(rosdep keys --from-paths "${paths[@]}" --ignore-src --rosdistro "$ROS_DISTRO_NAME" 2>/dev/null); do
+            if ! resolved="$(rosdep resolve "$key" --rosdistro "$ROS_DISTRO_NAME" 2>/dev/null)"; then
+                unresolved+=("$key")
+                continue
+            fi
+            installer=""
+            while read -r line; do
+                case "$line" in
+                    "#"*) installer="${line#\#}" ;;
+                    *) [ "$installer" = "apt" ] && for name in $line; do needed+=("$name"); done ;;
+                esac
+            done <<<"$resolved"
+        done
+        [ ${#needed[@]} -gt 0 ] && apt_install "${needed[@]}"
+        if [ ${#unresolved[@]} -gt 0 ]; then
+            echo "install.sh: warning: rosdep cannot resolve: ${unresolved[*]}" >&2
+        fi
     else
         echo "install.sh: warning: rosdep update failed; dependencies were installed with apt above" >&2
     fi
