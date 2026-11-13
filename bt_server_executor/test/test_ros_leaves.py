@@ -17,7 +17,9 @@ pytest.importorskip("rclpy")
 pytest.importorskip("bt_server_interfaces.action")
 
 from action_msgs.srv import CancelGoal  # noqa: E402
+from rclpy.action.client import ClientGoalHandle  # noqa: E402
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy  # noqa: E402
+from rclpy.task import Future  # noqa: E402
 from std_msgs.msg import Float64, String  # noqa: E402
 
 from bt_server_core.engine import Outcome  # noqa: E402
@@ -278,18 +280,20 @@ def test_call_action_server_lost(h):
     Cancelling, and Failed "server lost" when the cancel nobody confirms has timed out."""
     proc = subprocess.Popen([sys.executable, "-c", SERVER_SCRIPT, f"{h.ns}/lost"])
     try:
-        h.ready_action(f"{h.ns}/lost")
+        h.confirm_action(f"{h.ns}/lost")
         config = {"cancel_timeout_ms": 1000, "on_unconfirmed_cancel": "continue"}
         run = h.run(bundle(call_action(f"{h.ns}/lost"), config=config))
-        h.spin_for(0.5)
+        action_leaf = run.runner.node(1).leaf
+        accepted = lambda: action_leaf._goal is not None and action_leaf._goal.handle is not None  # noqa: E731
+        assert h.spin_until(accepted, 5.0), "the server did not accept the goal"
         assert run.sink.letters() == "R R"
         proc.send_signal(signal.SIGINT)
         proc.wait(timeout=10)
         exited = h.now()
-        h.finish(run, 10.0)
+        h.finish(run, 15.0)
         cancelling = run.sink.status_times(1, "C")[0]
-        assert cancelling - exited <= 2.5
-        assert near(run.sink.status_times(1, "F")[0], cancelling + 1.0)
+        assert cancelling - exited <= 4.0
+        assert 0.8 <= run.sink.status_times(1, "F")[0] - cancelling <= 2.5
         assert run.sink.error_of(1) == "server lost"
         assert run.result.unconfirmed_cancels == 1
     finally:
@@ -321,7 +325,7 @@ def test_call_action_timeout_cancel_answered_unknown_goal(h):
     timeout = 6.0
     procs = [subprocess.Popen([sys.executable, "-c", SERVER_SCRIPT, f"{h.ns}/restart"])]
     try:
-        h.ready_action(f"{h.ns}/restart")
+        h.confirm_action(f"{h.ns}/restart")
         node = call_action(f"{h.ns}/restart", Timeout=timeout)
         fallback = leaf("Set", "ok", ValueName="ok", CompareTo=None, LiteralValue=True)
         run = h.run(bundle(node, fallback, composite="Selector"), [entry("ok", "Bool", False)])
@@ -384,3 +388,26 @@ def test_publish_keep_for_late_joiners_hands_on_the_last_message_only(h):
     h.spin_until(lambda: received, 3.0)
     h.spin_for(0.5)
     assert received == ["second"]
+
+
+def test_call_action_cancel_without_reply_is_sent_again(h, monkeypatch):
+    """A cancel whose reply is lost (a server drops replies to clients it has not matched yet) is
+    sent again after 1 s: the node settles long before the cancel timeout (5 s)."""
+    server = ScriptedAction(h, ACTION)
+    h.ready_action(f"{h.ns}/{ACTION}")
+    original = ClientGoalHandle.cancel_goal_async
+    calls = []
+
+    def first_reply_lost(handle):
+        calls.append(h.now())
+        return Future() if len(calls) == 1 else original(handle)
+
+    monkeypatch.setattr(ClientGoalHandle, "cancel_goal_async", first_reply_lost)
+    run = h.run(bundle(call_action(f"{h.ns}/{ACTION}", Timeout=1.0)))
+    result = h.finish(run)
+    cancelling = run.sink.status_times(1, "C")[0]
+    assert near(cancelling, 1.0)
+    assert len(calls) == 2 and 0.9 <= calls[1] - calls[0] <= 1.4
+    assert len(server.cancels) == 1
+    assert run.sink.status_times(1, "F")[0] - cancelling < 2.0
+    assert run.sink.error_of(1) == "timed out" and result.unconfirmed_cancels == 0

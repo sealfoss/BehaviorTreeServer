@@ -265,6 +265,21 @@ class Harness:
         self.spin_for(ros_leaves.FIRST_MATCH_GRACE_S)
         return client
 
+    def confirm_action(self, name: str, action_type: Any = Fibonacci, timeout: float = 15.0) -> Any:
+        """The cached client of a server in another process, once that server has matched this
+        client too: a probe goal is answered (and cancelled). Under load a server drops its first
+        replies to a client it has not matched yet."""
+        client = self.ready_action(name, action_type)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            future = client.send_goal_async(action_type.Goal())
+            if self.spin_until(future.done, 2.0):
+                handle = future.result()
+                if handle.accepted:
+                    self.spin_until(handle.cancel_goal_async().done, 2.0)
+                return client
+        raise TimeoutError(f"{name} never answered a goal")
+
     def ready_service(self, name: str, srv_type: Any = Trigger) -> Any:
         """The cached service client of ``name``, once it sees its service (as after an earlier run)."""
         client = self.clients.service_client(srv_type, name)

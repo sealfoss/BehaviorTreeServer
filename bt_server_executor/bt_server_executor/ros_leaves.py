@@ -30,8 +30,10 @@ this and fails with the reason when it starts.
   lost" (its cancel is then confirmed by nobody: it times out, and the journal keeps sending it).
 * Result: succeeded -> the ``Result.`` outputs are written and the node succeeds; aborted ->
   "aborted"; cancelled without a halt -> "cancelled by the server".
-* Halted: a cancel is sent (once the goal reply is there); the leaf settles when the result
-  arrives, whatever its status. A refused cancel leaves it Cancelling until the result comes or
+* Halted: a cancel is sent (once the goal reply is there), and sent again every second while
+  it has no reply, until the tree's cancel timeout (a server that has not matched this client
+  yet drops its reply); the leaf settles when the result arrives, whatever its status, or at
+  once when the server says it does not know the goal. A refused cancel leaves it Cancelling until the result comes or
   the engine's cancel timeout makes the goal unsettled; the journal then sends the cancel again
   until the goal ends, also after the run.
 * *Timeout* is the engine's deadline: the node shows Cancelling, then Failed "timed out".
@@ -105,6 +107,10 @@ LIVENESS_PERIOD_S = 1.0
 FEEDBACK_PERIOD_S = 0.1
 SUBSCRIBERS_WAIT_S = 5.0
 EXECUTOR_SILENCE_S = 3.0
+#: A cancel without a reply is sent again after this long, until it is answered or the tree's
+#: cancel timeout passes (then the journal goes on): a server that has not matched this client
+#: yet drops its reply, and cancelling a goal twice does no harm.
+CANCEL_RESEND_S = 1.0
 #: A client that has just found its server waits this long before its first request: the server
 #: may not have found the client's reply reader yet, and a reply sent before that is lost.
 FIRST_MATCH_GRACE_S = 0.3
@@ -272,6 +278,8 @@ class _Goal:
         self.gave_up = False     # no reply in time: a late acceptance is cancelled
         self.reported = False    # the leaf has been told how this goal went
         self.cancel_sent = False
+        self.cancel_answered = False
+        self.cancel_until = 0.0
         self.reply_timer: Any = None
         self.feedback_timeout = 0.0
         self.last_feedback = 0.0
@@ -437,15 +445,27 @@ class _Goal:
         if self.handle is None or self.cancel_sent:
             return
         self.cancel_sent = True
-        self.handle.cancel_goal_async().add_done_callback(self._on_cancel_reply)
+        self.cancel_until = self.timers.now() + self.run.cancel_timeout_s
         self.run.goal_cancel_sent(self.goal_id)
+        self._send_cancel()
+
+    def _send_cancel(self) -> None:
+        """Send the cancel, and again every :data:`CANCEL_RESEND_S` while it has no reply."""
+        if self.state == "over" or self.cancel_answered:
+            return
+        self.handle.cancel_goal_async().add_done_callback(self._on_cancel_reply)
+        if self.timers.now() + CANCEL_RESEND_S < self.cancel_until:
+            self.timers.after(CANCEL_RESEND_S, self._send_cancel)
 
     def _on_cancel_reply(self, future: Any) -> None:
         try:
             response = future.result()
-        except Exception:  # noqa: BLE001 - the journal sends the cancel again
+        except Exception:  # noqa: BLE001 - the request was dropped: it is sent again
             return
-        code = response.return_code if response is not None else None
+        if response is None:
+            return
+        self.cancel_answered = True
+        code = response.return_code
         if code == CancelGoal.Response.ERROR_REJECTED:
             self.ctx.log(LogLevel.WARNING, f"{self.action_name}: the server refused to cancel the goal")
         elif code == CancelGoal.Response.ERROR_UNKNOWN_GOAL_ID and self.state != "over":
