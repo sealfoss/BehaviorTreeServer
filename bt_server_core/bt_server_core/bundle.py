@@ -74,44 +74,50 @@ def build_bundle(
     files: dict[str, dict] = {}
     edges: dict[str, list[tuple[dict, str, str | None]]] = {}
 
-    def load(key: str) -> bool:
-        """Whether the tree ``key`` can be had; its file data and Sub-Tree nodes are noted."""
-        if key in files:
-            return True
-        holder = document(key)
+    def load(name: str) -> str | None:
+        """The key of the tree ``name`` as its document spells it (``robot`` for a node naming
+        ``Robot_BT.json`` where case does not matter), or None when it cannot be had; its file
+        data and Sub-Tree nodes are noted."""
+        holder = document(name)
         if holder is None:
-            return False
-        files[key] = holder.to_file()
-        edges[key] = [
-            (item, item["type"], _target(key, item))
-            for item in files[key]["nodes"]
-            if item.get("type") in _SUBTREE_TYPES and not holder.is_placeholder(item["id"])
-        ]
-        return True
+            return None
+        key = holder.key or name
+        if key not in files:
+            files[key] = holder.to_file()
+            edges[key] = [
+                (item, item["type"], _target(key, item))
+                for item in files[key]["nodes"]
+                if item.get("type") in _SUBTREE_TYPES and not holder.is_placeholder(item["id"])
+            ]
+        return key
 
-    if not load(root_key):
+    loaded_root = load(root_key)
+    if loaded_root is None:
         raise KeyError(f"the tree {root_key!r} cannot be read")
+    root_key = loaded_root
     trees: dict[str, dict] = {}
     remote: list[str] = []
 
-    def expand(key: str, chain: frozenset[str]) -> None:
-        """Name the trees of ``key``'s Sub-Tree nodes, depth first; ``chain``: the trees that
-        contain ``key`` in this run. A Sub-Tree node naming one of them would contain itself
-        (the widget fails that node and only that one): it gets no ``tree`` key."""
+    def expand(key: str) -> None:
+        """Name the trees of ``key``'s Sub-Tree nodes and put them in, depth first. A node that
+        would contain itself keeps its ``tree`` key too: whether it does depends on the chain of
+        Sub-Tree nodes that leads to it, so the engine decides it per chain when it builds the
+        run (it then fails that node on that chain only, as the widget does)."""
         trees[key] = files[key]
-        for item, kind, target in edges[key]:
-            if target is None or not load(target) or (kind == SUB_TREE and target in chain):
+        for item, kind, name in edges[key]:
+            target = load(name) if name is not None else None
+            if target is None:
                 continue
             item["tree"] = target
             if kind == REMOTE_SUB_TREE:
-                remote.append(target)  # a run of its own: expanded with a chain of its own below
+                remote.append(target)  # a run of its own, on another executor
             elif target not in trees:
-                expand(target, chain | {target})
+                expand(target)
 
-    expand(root_key, frozenset({root_key}))
+    expand(root_key)
     for key in remote:  # grows while remote trees name further remote trees
         if key not in trees:
-            expand(key, frozenset({key}))
+            expand(key)
     bundle: dict[str, Any] = {"format": BUNDLE_FORMAT, "version": 1, "root": root_key, "trees": trees}
     if remote and get_blackboard is not None:
         bundle["blackboards"] = {key: list(get_blackboard(key)) for key in dict.fromkeys(remote)}
@@ -190,33 +196,38 @@ def validate_bundle(
         findings.append({"path": path, "severity": severity, "text": text})
 
     trees = bundle.get("trees", {})
-    stack, seen = [bundle["root"]], set()
-    while stack:
-        key = stack.pop()
-        if key in seen or key not in trees:
-            continue
-        seen.add(key)
+    checked: set[str] = set()
+    walked: set[tuple[str, frozenset[str]]] = set()
+    looping: set[str] = set()
+
+    def walk(key: str, chain: frozenset[str]) -> None:
+        """Check the tree ``key`` (its nodes once) and follow its Sub-Tree nodes; ``chain``: the
+        trees that contain it on this way down. A Sub-Tree node naming one of them contains
+        itself on this chain (the widget fails it there, and only there)."""
+        if (key, chain) in walked or key not in trees:
+            return
+        walked.add((key, chain))
+        first = key not in checked
+        checked.add(key)
         for item in _reachable(trees[key]):
             path = f"tree:{key}/{item.get('id')}"
             kind = item.get("type")
             builtin = node_types.spec(kind) if isinstance(kind, str) else None
             if (builtin is None or builtin.kind == "leaf") and kind not in types:
-                report(path, "error", f"unknown node type {kind!r}")
+                if first:
+                    report(path, "error", f"unknown node type {kind!r}")
                 continue
-            if kind == NEGATION and not any(link.get("parent") == item.get("id") for link in trees[key]["connections"]):
-                report(path, "error", "the Negation has no child")
-            if kind in _SUBTREE_TYPES:
-                _check_subtree(key, item, trees, report, path)
-                if kind == SUB_TREE and isinstance(item.get("tree"), str):
-                    stack.append(item["tree"])
-            if kind == "Evaluation" and _field(item, "Wait", False) is True and _no_timeout(_field(item, "WaitTimeout", 0.0)):
-                report(path, "warning", "the Evaluation waits without a timeout")
-            if kind in ("CallAction", REMOTE_SUB_TREE) and _no_timeout(_field(item, "Timeout", 0.0)):
-                report(path, "warning", f"the {builtin.title if builtin else kind} node has no Timeout: it may wait for ever")
-            if kind == REMOTE_SUB_TREE:
-                _check_remote_links(item, bundle, entries, report, path)
-            else:
-                _check_links(item, types.get(kind, {}), entries, report, path)
+            if kind == SUB_TREE and isinstance(item.get("tree"), str):
+                if item["tree"] in chain:
+                    if path not in looping:
+                        looping.add(path)
+                        report(path, "error", f"the sub-tree {item['tree']!r} contains itself")
+                else:
+                    walk(item["tree"], chain | {item["tree"]})
+            if first:
+                _check_node(key, item, kind, builtin, bundle, types, entries, report, path)
+
+    walk(bundle["root"], frozenset({bundle["root"]}))
     for name, entry in entries.items():
         _check_source(name, entry, report)
         if name in set(object_names):
@@ -224,7 +235,25 @@ def validate_bundle(
     return findings
 
 
-def _check_subtree(key: str, item: dict, trees: dict, report: Callable, path: str) -> None:
+def _check_node(key: str, item: dict, kind: Any, builtin: Any, bundle: dict, types: dict, entries: dict,
+                report: Callable, path: str) -> None:
+    """The checks of one node that do not depend on the way it is reached."""
+    trees = bundle.get("trees", {})
+    if kind == NEGATION and not any(link.get("parent") == item.get("id") for link in trees[key]["connections"]):
+        report(path, "error", "the Negation has no child")
+    if kind in _SUBTREE_TYPES:
+        _check_subtree(key, item, report, path)
+    if kind == "Evaluation" and _field(item, "Wait", False) is True and _no_timeout(_field(item, "WaitTimeout", 0.0)):
+        report(path, "warning", "the Evaluation waits without a timeout")
+    if kind in ("CallAction", REMOTE_SUB_TREE) and _no_timeout(_field(item, "Timeout", 0.0)):
+        report(path, "warning", f"the {builtin.title if builtin else kind} node has no Timeout: it may wait for ever")
+    if kind == REMOTE_SUB_TREE:
+        _check_remote_links(item, bundle, entries, report, path)
+    else:
+        _check_links(item, types.get(kind, {}), entries, report, path)
+
+
+def _check_subtree(key: str, item: dict, report: Callable, path: str) -> None:
     if isinstance(item.get("tree"), str):
         if item["type"] == REMOTE_SUB_TREE and not str(_field(item, "Executor", "")).strip():
             report(path, "error", "the Remote Sub-Tree names no executor")
@@ -238,10 +267,7 @@ def _check_subtree(key: str, item: dict, trees: dict, report: Callable, path: st
     except PathError as error:
         report(path, "error", str(error))
         return
-    if target in trees:
-        report(path, "error", f"the sub-tree {target!r} contains itself")
-    else:
-        report(path, "error", f"the sub-tree file '{tree_file_name(target)}' is missing")
+    report(path, "error", f"the sub-tree file '{tree_file_name(target)}' is missing")
 
 
 def _check_links(item: dict, spec: dict, entries: dict, report: Callable, path: str) -> None:

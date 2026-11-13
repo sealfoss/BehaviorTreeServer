@@ -57,6 +57,7 @@ __all__ = [
     "NODE_SIZES",
     "ORDER_WARNING_DISTANCE",
     "SCENE_LIMIT",
+    "WIDGET_FONTS",
     "Applied",
     "clamp_position",
     "OpRefused",
@@ -84,11 +85,11 @@ BOX_LIMITS = {
 }
 DEFAULT_GROUP_COLOR = "#3d7cc9"
 
-#: Sizes (width, height) in pixels of nodes as the widget 0.10.0 draws them by default, measured
-#: with its default font (Qt, offscreen). They give the centres the widget orders children by
-#: (the 40-pixel warning of design 12) and decide which nodes lie inside a group (Promote to
-#: Sub-Tree). Types not listed (custom and ROS leaves, placeholders) take
-#: :data:`DEFAULT_LEAF_SIZE`, the size of a leaf without fields; Notes and Groups their own size.
+#: Sizes (width, height) in pixels of nodes with their default titles as the widget 0.10.0 draws
+#: them (Qt, offscreen). They decide which nodes lie inside a group (Promote to Sub-Tree), where
+#: the browser's sizes are not known. Types not listed (custom and ROS leaves, placeholders) take
+#: :data:`DEFAULT_LEAF_SIZE`; Notes and Groups their own size. The order the widget runs children
+#: in is worked out with :meth:`TreeDocument.widget_widths`, which follows titles and fields.
 NODE_SIZES = {
     ROOT: (210, 74),
     SEQUENCE: (130, 102),
@@ -108,6 +109,46 @@ DEFAULT_LEAF_SIZE = (246, 74)
 
 #: Siblings whose centres are closer than this sideways get a warning when saved as version 1.
 ORDER_WARNING_DISTANCE = 40.0
+
+
+@dataclass(frozen=True)
+class _WidgetFont:
+    """How wide the widget 0.10.0 draws a node with one font, measured with the real widget
+    (``relayout``, then ``width()``): the title text plus ``padding``, at least ``minimum``; a
+    leaf at least as wide as its widest field row, which depends on the editor of the field's
+    value; the editors of Evaluation, Set, Print Message and Sub-Tree are fixed."""
+
+    name: str
+    char_widths: str  # advance in pixels of the characters 32 to 126, in base 36
+    other_char: int  # advance of any other character
+    padding: int
+    minimum: int
+    rows: dict  # widget field kind (int, float, str, bool, other, an empty list) -> row width
+    choice: int  # a list row: the widest item's text plus this
+    editors: dict  # type -> width of its own editors
+
+    def text(self, text: str) -> int:
+        return sum(int(self.char_widths[ord(c) - 32], 36) if 32 <= ord(c) < 127 else self.other_char for c in text)
+
+
+#: Two fonts bracket the widths the widget draws: Segoe UI 9 pt (Windows, a narrow desktop font)
+#: and Qt's fallback font (12 pixels per character, as wide as large desktop fonts).
+WIDGET_FONTS = (
+    _WidgetFont(
+        "Segoe UI 9pt",
+        "33576aa3445835356666666666338885b878866893476b997976787b777454853676764773363b77774547695654348",
+        8, 32, 85,
+        {"int": 245, "float": 288, "str": 208, "bool": 139, "other": 208, "list": 197}, 161,
+        {"Evaluation": 246, "Set": 244, "Print Message": 227, SUB_TREE: 221},
+    ),
+    _WidgetFont(
+        "Qt fallback (offscreen)",
+        "c" * 95,
+        12, 30, 130,
+        {"int": 398, "float": 482, "str": 440, "bool": 244, "other": 440, "list": 344}, 260,
+        {"Evaluation": 382, "Set": 382, "Print Message": 306, SUB_TREE: 352},
+    ),
+)
 
 #: Node ids made by browsers: 32 hex digits (``uuid4().hex``).
 NODE_ID = re.compile(r"[0-9a-f]{32}")
@@ -168,11 +209,14 @@ class Applied:
         rev: The document's revision after it.
         reorder: For a ``node.move`` sent at a stale revision: the parents whose new child
             order was dropped; that browser works them out again (contract 5.3).
+        problems: What was left out of the operation, as the widget leaves it out (a Root or an
+            invalid connection in a ``paste``).
     """
 
     op: dict
     rev: int
     reorder: list[str] = field(default_factory=list)
+    problems: list[str] = field(default_factory=list)
 
 
 def default_group_name(number: int) -> str:
@@ -219,15 +263,36 @@ def _widget_kind(value: Any) -> str:
     return "other"
 
 
-def _json_safe(value: Any) -> Any:
-    """Raw file JSON for a browser: ``NaN`` and infinities, which a browser's JSON parser
-    refuses, become their text (``"nan"``, ``"inf"``, ``"-inf"``)."""
+_FLOAT_TAG = "__float__"
+
+
+def _raw_to_wire(value: Any) -> Any:
+    """A placeholder's saved data for a browser, whose JSON parser refuses ``NaN`` and infinities:
+    those become ``{"__float__": "nan" | "inf" | "-inf"}``, and an object that already is
+    ``{"__float__": x}`` is wrapped once more, so :func:`_raw_from_wire` gives back exactly the
+    data as read (F-08)."""
     if isinstance(value, float) and not math.isfinite(value):
-        return repr(value)
+        return {_FLOAT_TAG: repr(value)}
     if isinstance(value, list):
-        return [_json_safe(item) for item in value]
+        return [_raw_to_wire(item) for item in value]
     if isinstance(value, dict):
-        return {key: _json_safe(item) for key, item in value.items()}
+        encoded = {key: _raw_to_wire(item) for key, item in value.items()}
+        return {_FLOAT_TAG: encoded} if list(value) == [_FLOAT_TAG] else encoded
+    return value
+
+
+def _raw_from_wire(value: Any) -> Any:
+    """Inverse of :func:`_raw_to_wire`."""
+    if isinstance(value, list):
+        return [_raw_from_wire(item) for item in value]
+    if isinstance(value, dict):
+        if list(value) == [_FLOAT_TAG]:
+            inner = value[_FLOAT_TAG]
+            if isinstance(inner, str) and inner in ("nan", "inf", "-inf"):
+                return float(inner)
+            if isinstance(inner, dict):
+                return {key: _raw_from_wire(item) for key, item in inner.items()}
+        return {key: _raw_from_wire(item) for key, item in value.items()}
     return value
 
 
@@ -308,6 +373,7 @@ class TreeDocument:
         self._nodes: dict[str, _Node] = {}
         self._children: dict[str, list[str]] = {}
         self._parent: dict[str, str] = {}
+        self._skipped: list[str] = []  # what the operation being applied left out
         self.config = self._load_config(data.get("config"))
         self.view = self._load_view(data.get("view"))
         self.legacy_blackboard = copy.deepcopy(data["blackboard"]) if isinstance(data.get("blackboard"), list) else None
@@ -599,6 +665,8 @@ class TreeDocument:
         name = spec["name"]
         if name in _ENTRY_NAME_FIELDS.get(type_name, ()):
             return (value or None) if value is None or isinstance(value, str) else _REJECTED
+        if spec.get("kind") == "entry":
+            return value if value is None or isinstance(value, str) else _REJECTED
         if type_name in ("Evaluation", "Set") and name == "LiteralValue":
             return value if value is None or infer_type(value) != "Object" else _REJECTED
         if type_name == "Print Message" and name == "Level":
@@ -791,23 +859,72 @@ class TreeDocument:
             data["blackboard"] = copy.deepcopy(self.legacy_blackboard)
         return data
 
+    def display_title(self, node_id: str) -> str:
+        """The title as the widget shows it: ``title (Sequence)`` for a composite, a Negation or a
+        Sub-Tree whose title is not its type, ``title (unknown type)`` for a placeholder."""
+        node = self._nodes[node_id]
+        if node.raw is not None:
+            return f"{node.title} (unknown type)"
+        shown = node.data["composite"] if node.type == ROOT else node.type
+        if node.type in (ROOT, *COMPOSITES, NEGATION, SUB_TREE):
+            return node.title if node.title == shown else f"{node.title} ({shown})"
+        return node.title
+
+    def widget_widths(self, node_id: str) -> tuple[int, ...]:
+        """The node's width as the widget draws it, with each of :data:`WIDGET_FONTS`."""
+        node = self._nodes[node_id]
+        title = self.display_title(node_id)
+        fields = node.data.get("fields", {}) if node.raw is None else node.raw.get("fields", {})
+        widths = []
+        for font in WIDGET_FONTS:
+            width = max(font.minimum, font.text(title) + font.padding)
+            if node.type in font.editors and node.raw is None:
+                width = max(width, font.editors[node.type])
+            elif node.type not in (ROOT, *COMPOSITES, NEGATION) and isinstance(fields, dict):
+                for value in fields.values():
+                    kind = _widget_kind(value)
+                    if kind == "list" and value:
+                        row = max(font.text(_item_text(item)) for item in value) + font.choice
+                    else:
+                        row = font.rows[kind]
+                    width = max(width, row)
+            widths.append(width)
+        return tuple(widths)
+
     def save_warnings(self) -> list[str]:
-        """Warnings for Save: for a version 1 file, siblings whose centres are closer than 40
-        pixels sideways, which the widget may run in another order (design 12, F-11). Centres use
-        :data:`NODE_SIZES`."""
+        """Warnings for Save of a version 1 file, whose children the widget orders by the centres
+        it draws, left to right (design 12, F-06, F-11): a parent whose written order is not the
+        order of those centres, and siblings whose centres are closer than 40 pixels sideways.
+        Centres are worked out with each of :data:`WIDGET_FONTS`."""
         if self.file_version() != 1:
             return []
         warnings = []
         for parent, children in self._children.items():
-            centres = [(self._nodes[child], self._nodes[child].x + self.size(child)[0] / 2.0) for child in children]
-            for index, (first, first_x) in enumerate(centres):
-                for second, second_x in centres[index + 1:]:
-                    if abs(first_x - second_x) < ORDER_WARNING_DISTANCE:
-                        warnings.append(
-                            f"{first.title!r} and {second.title!r} below {self._nodes[parent].title!r} are less than "
-                            f"{ORDER_WARNING_DISTANCE:.0f} pixels apart sideways: the widget may run them in "
-                            "another order; spread them sideways"
-                        )
+            if len(children) < 2:
+                continue
+            parent_title = self._nodes[parent].title
+            centres = {child: [self._nodes[child].x + width / 2.0 for width in self.widget_widths(child)]
+                       for child in children}
+            for index in range(len(WIDGET_FONTS)):
+                drawn = sorted(children, key=lambda child: (centres[child][index], self._nodes[child].y))
+                if drawn != children:
+                    warnings.append(
+                        f"the children of {parent_title!r} run in the order "
+                        f"{', '.join(repr(self._nodes[child].title) for child in children)}, but the widget runs them "
+                        f"left to right: {', '.join(repr(self._nodes[child].title) for child in drawn)}; "
+                        "place them left to right in the order they run"
+                    )
+                    break
+            else:
+                for position, first in enumerate(children):
+                    for second in children[position + 1:]:
+                        gap = min(abs(a - b) for a, b in zip(centres[first], centres[second]))
+                        if gap < ORDER_WARNING_DISTANCE:
+                            warnings.append(
+                                f"{self._nodes[first].title!r} and {self._nodes[second].title!r} below "
+                                f"{parent_title!r} are less than {ORDER_WARNING_DISTANCE:.0f} pixels apart sideways: "
+                                "the widget may run them in another order; spread them sideways"
+                            )
         return warnings
 
     def mark_saved(self) -> None:
@@ -819,7 +936,7 @@ class TreeDocument:
         """The node in wire form (contract 5.1)."""
         node = self._nodes[node_id]
         if node.raw is not None:
-            item = _json_safe(self._file_item(node))
+            item = _raw_to_wire(self._file_item(node))
             item["unknown"] = True
             return item
         item = self._file_item(node)
@@ -903,10 +1020,11 @@ class TreeDocument:
                 raise OpRefused("group.promote is carried out with promote.promote()")
             raise OpRefused(f"unknown operation {name!r}")
         reorder: list[str] = []
+        self._skipped = []
         normalised = handler(self, op, entry_types or {}, rev, reorder)
         self.rev += 1
         self.unsaved = True
-        return Applied(normalised, self.rev, reorder)
+        return Applied(normalised, self.rev, reorder, self._skipped)
 
     def apply_all(self, ops: list[dict], *, running: bool = False, entry_types: dict[str, str] | None = None) -> list[Applied]:
         """Apply several operations as one: if one is refused, none is applied.
@@ -945,22 +1063,35 @@ class TreeDocument:
 
     def rename_entry(self, old: str, new: str, entry_types: dict[str, str] | None = None) -> list[Applied]:
         """An entry was renamed: Evaluation and Set (``ValueName``, ``CompareTo``), Print Message
-        (``Source``), bindings and outputs that name it follow (design 6.4). Returns the applied
-        operations to broadcast."""
-        ops: list[dict] = []
+        (``Source``), bindings and outputs that name it follow (design 6.4). The values are
+        rewritten as they are: a rename is never refused because of an unrelated part of a node
+        (a binding kept from the file whose field is gone, say). Returns the applied operations
+        to broadcast."""
+        applied: list[Applied] = []
+
+        def changed(op: dict) -> None:
+            self.rev += 1
+            self.unsaved = True
+            applied.append(Applied(op, self.rev))
+
         for node in self._nodes.values():
             if node.raw is not None or "fields" not in node.data:
                 continue
             fields = node.data["fields"]
-            for name in ("ValueName", *_ENTRY_NAME_FIELDS.get(node.type, ())):
-                if node.type in _ENTRY_NAME_FIELDS and fields.get(name) == old:
-                    ops.append({"op": "node.set_field", "id": node.id, "field": name,
-                                "value": field_to_wire(self._kind_of(node, name), new)})
+            names = ("ValueName", *_ENTRY_NAME_FIELDS[node.type]) if node.type in _ENTRY_NAME_FIELDS else ()
+            names += tuple(spec["name"] for spec in self._declared(node.type) if spec.get("kind") == "entry")
+            for name in dict.fromkeys(names):
+                if fields.get(name) == old:
+                    fields[name] = new
+                    changed({"op": "node.set_field", "id": node.id, "field": name,
+                             "value": field_to_wire(self._kind_of(node, name), new)})
             for key, op_name in (("bindings", "node.set_binding"), ("outputs", "node.set_output")):
-                for path, entry in node.data.get(key, {}).items():
+                mapping = node.data.get(key, {})
+                for path, entry in mapping.items():
                     if entry == old:
-                        ops.append({"op": op_name, "id": node.id, "key": path, "entry": new})
-        return self.apply_all(ops, entry_types=entry_types)
+                        mapping[path] = new
+                        changed({"op": op_name, "id": node.id, "key": path, "entry": new})
+        return applied
 
     # -------------------------------------------------------------------------------- helpers
     def _node(self, op: dict, key: str = "id") -> _Node:
@@ -1046,7 +1177,7 @@ class TreeDocument:
             if not paste:
                 raise OpRefused(f"unknown node type {type_name!r}")
             problems: list[str] = []
-            saved = {key: value for key, value in item.items() if key != "unknown"}
+            saved = _raw_from_wire({key: value for key, value in item.items() if key != "unknown"})
             node = self._node_from_file(saved, repr(saved.get("title", type_name)), problems)
         else:
             node = self._node_from_wire(item, type_name)
@@ -1129,24 +1260,18 @@ class TreeDocument:
             raise OpRefused(f"the node {node.title!r} has no field {name!r}")
         try:
             if path is not None:
-                return self._set_inside(node.data["fields"][name], path, field_from_wire(kind or "other", wire))
-            if node.type in ("Evaluation", "Set") and name == "LiteralValue":
-                value = typed_from_wire(wire)
-                if value is not None and infer_type(value) == "Object":
-                    raise ValueError("an Object cannot be a literal")
-                return value
-            value = field_from_wire(self._kind_of(node, name), wire)
+                value = self._set_inside(node.data["fields"][name], path, field_from_wire(kind or "other", wire))
+            elif node.type in ("Evaluation", "Set") and name == "LiteralValue":
+                value = typed_from_wire(wire, exact=True)  # a tuple literal stays a tuple
+            else:
+                value = field_from_wire(self._kind_of(node, name), wire)
         except ValueError as error:
             raise OpRefused(f"{name}: {error}") from error
-        if name in _ENTRY_NAME_FIELDS.get(node.type, ()):
-            if value is not None and not isinstance(value, str):
-                raise OpRefused(f"{name} names an entry or is empty")
-            return value or None
-        if node.type == "Evaluation" and name == "Operator" and value not in OPERATORS:
-            raise OpRefused(f"the operator is one of {' '.join(OPERATORS)}")
-        if node.type == "Print Message" and name == "Level" and _log_level(value) is _REJECTED:
-            raise OpRefused("the level is 0 to 4")
-        return value
+        spec = next(spec for spec in self._declared(node.type) if spec["name"] == name)
+        accepted = self._accept_field(node.type, spec, value)  # what loading the saved file would keep
+        if accepted is _REJECTED:
+            raise OpRefused(_rejection(node.type, spec, value))
+        return accepted
 
     @staticmethod
     def _set_inside(container: Any, path: str, value: Any) -> Any:
@@ -1452,7 +1577,13 @@ class TreeDocument:
 
     def _op_conn_remove(self, op: dict, entry_types: dict, rev: int | None, reorder: list) -> dict:
         parent_id, child_id = op.get("parent"), op.get("child")
-        if not isinstance(child_id, str) or self._parent.get(child_id) != parent_id:
+        if (
+            not isinstance(parent_id, str)
+            or not isinstance(child_id, str)
+            or parent_id not in self._nodes
+            or child_id not in self._nodes
+            or self._parent.get(child_id) != parent_id
+        ):
             raise OpRefused("there is no such connection")
         self._unlink(child_id)
         return {"op": "conn.remove", "parent": parent_id, "child": child_id}
@@ -1463,18 +1594,21 @@ class TreeDocument:
             raise OpRefused("paste needs nodes and connections")
         nodes: list[_Node] = []
         taken: set[str] = set()
-        for item in items:
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or item.get("type") == ROOT:  # left out, as the widget does
+                what = "is the Root" if isinstance(item, dict) else "is not an object"
+                self._skipped.append(f"pasted node {index} {what}; it was left out")
+                continue
             node = self._new_node(item, taken, paste=True)
             taken.add(node.id)
             nodes.append(node)
+        if not nodes:
+            raise OpRefused("there is nothing to paste")
         saved = (dict(self._nodes), {key: list(value) for key, value in self._children.items()}, dict(self._parent))
         counter = self._group_counter
         try:
             self._nodes.update((node.id, node) for node in nodes)
-            problems: list[str] = []
-            self._load_connections(links, problems, among=taken)
-            if problems:
-                raise OpRefused(f"the pasted connections are invalid: {problems[0]}")
+            self._load_connections(links, self._skipped, among=taken)  # invalid ones are left out
             names: set[str] = set()
             for node in nodes:
                 if node.type == GROUP and node.raw is None and default_group_number(node.title) is not None:
@@ -1537,6 +1671,30 @@ def _log_level(value: Any) -> Any:
     if isinstance(value, str) and value.strip().upper() in _LOG_LEVELS:
         return _LOG_LEVELS[value.strip().upper()]
     return _REJECTED
+
+
+def _rejection(type_name: str, spec: dict, value: Any) -> str:
+    """Why a value cannot go into a field (the reason :meth:`TreeDocument._accept_field` drops it)."""
+    name = spec["name"]
+    if name in _ENTRY_NAME_FIELDS.get(type_name, ()) or spec.get("kind") == "entry":
+        return f"{name} names an entry or is empty"
+    if type_name == "Evaluation" and name == "Operator":
+        return f"the operator is one of {' '.join(OPERATORS)}"
+    if type_name == "Print Message" and name == "Level":
+        return "the level is 0 to 4"
+    if name == "LiteralValue":
+        return "an Object cannot be a literal"
+    expected = _widget_kind(spec.get("default"))
+    return (f"{name} holds {'a ' + expected if expected != 'other' else 'a value of its own kind'}, not a "
+            f"{type(value).__name__}: the tree file could not keep it")
+
+
+def _item_text(item: Any) -> str:
+    """How the widget's combo box shows an item of a list field (``str()``)."""
+    try:
+        return str(item)
+    except Exception:  # noqa: BLE001 - a value without a working str()
+        return repr(item)
 
 
 def _parse_color(color: Any) -> str | None:

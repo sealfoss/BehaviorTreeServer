@@ -150,7 +150,6 @@ def test_the_widget_refusals(tmp_path):
     refusal(document, "cannot be used as a file name", root=tmp_path, key="patrol.")
     refusal(document, "names the file of this tree", root=tmp_path, key="robot")
     refusal(document, "names the file of this tree", root=tmp_path, key="main", open_keys=["main"])
-    refusal(document, "cannot name a tree", root=tmp_path, key="patrol_BT.json")
     refusal(document, "outside", root=tmp_path, key="../patrol")
     # a node inside with a child outside
     document.apply({"op": "node.add", "node": {"id": "f" * 32, "type": "Sequence", "x": 100.0, "y": 360.0}})
@@ -173,3 +172,23 @@ def test_sizes_from_the_browser_decide_what_lies_inside(tmp_path):
     document = source()
     data, _ = promote(document, GROUP, "patrol", tmp_path, sizes={C: (2000.0, 50.0)})
     assert C not in {node["id"] for node in data["nodes"]}
+
+
+def test_review_7_files_of_moved_sub_trees_follow_the_new_folder(tmp_path):
+    document = source()
+    document.apply({"op": "node.add", "node": {"id": "e" * 32, "type": "Sub-Tree", "title": "dock", "x": 100.0,
+                                               "y": 380.0, "fields": {"File": "common\\dock_BT.json"}}})
+    document.apply({"op": "node.add", "node": {"id": "d" * 32, "type": "Sub-Tree", "title": "far", "x": 150.0,
+                                               "y": 380.0, "fields": {"File": "C:/trees/x_BT.json"}}})
+    data, _ = promote(document, GROUP, "cells/patrol", tmp_path)
+    files = {item["id"]: item["fields"]["File"] for item in data["nodes"] if item["type"] == "Sub-Tree"}
+    assert files == {"e" * 32: "../common/dock_BT.json", "d" * 32: "C:/trees/x_BT.json"}
+    assert subtree_key("cells/patrol", files["e" * 32]) == subtree_key("robot", "common/dock_BT.json")
+    data, _ = promote(document, GROUP, "patrol", tmp_path)  # the same folder: unchanged, as in the widget
+    assert {item["fields"]["File"] for item in data["nodes"] if item["id"] == "e" * 32} == {"common\\dock_BT.json"}
+
+
+@pytest.mark.parametrize("name", ["patrol_BT", "patrol.json", "patrol_BT.json", "patrol_BB.json"])
+def test_review_10_promote_accepts_the_widget_spellings(tmp_path, name):
+    _, ops = promote(source(), GROUP, name, tmp_path)
+    assert ops[1]["node"]["fields"]["File"] == "patrol_BT.json" and ops[1]["node"]["title"] == "patrol"

@@ -52,6 +52,7 @@ __all__ = [
     "atomic_write_json",
     "blackboard_file_data",
     "blackboard_file_path",
+    "canonical_key",
     "check_tree_data",
     "document_key",
     "find_tree_file",
@@ -206,6 +207,21 @@ def find_tree_file(root: str | os.PathLike[str], key: str) -> Path | None:
         if path.is_file():
             return path
     return None
+
+
+def canonical_key(root: str | os.PathLike[str], key: str) -> str:
+    """``key`` spelt as the files on disk are: on a file system that ignores case (Windows,
+    macOS), ``ROBOT`` and ``robot`` name one file, so they must name one document. A key whose
+    tree does not exist, or that reaches its file through a symbolic link, is returned as given.
+
+    Raises:
+        PathError: the key leads outside the trees folder.
+    """
+    path = find_tree_file(root, key)
+    if path is None:
+        return key
+    on_disk = key_of_file(path, root)
+    return on_disk if on_disk.casefold() == key.casefold() else key
 
 
 def subtree_key(holder_key: str, file_name: str) -> str:
@@ -511,6 +527,7 @@ def load_tree(root: str | os.PathLike[str], name: str) -> LoadedTree:
     path = find_tree_file(root, key)
     if path is None:
         raise TreeFileError(f"'{tree_file_name(key)}' does not exist")
+    key = canonical_key(root, key)
     data = read_tree_file(path)
     blackboard_path = blackboard_file_path(root, key)
     has_file = blackboard_path.is_file()

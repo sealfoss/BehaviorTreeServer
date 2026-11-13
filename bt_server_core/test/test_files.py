@@ -13,6 +13,7 @@ from bt_server_core.files import (
     atomic_write_bytes,
     atomic_write_json,
     blackboard_file_path,
+    canonical_key,
     document_key,
     find_tree_file,
     key_of_file,
@@ -239,3 +240,14 @@ def test_parse_blackboard_drops_invalid_entries_with_problems():
 def test_malformed_sources(source):
     with pytest.raises(ValueError):
         parse_source(source)
+
+
+def test_review_10_keys_take_the_case_of_the_files_on_disk(tmp_path):
+    (tmp_path / "Cells").mkdir()
+    write(tmp_path / "Cells" / "Robot_BT.json", {"format": "behavior_tree_widget", "version": 1})
+    if not (tmp_path / "cells" / "ROBOT_BT.json").exists():
+        assert load_tree(tmp_path, "Cells/Robot").key == "Cells/Robot"
+        pytest.skip("this file system tells case apart: 'cells/robot' is another tree")
+    assert load_tree(tmp_path, "cells/ROBOT").key == "Cells/Robot"
+    assert canonical_key(tmp_path, "CELLS/robot") == "Cells/Robot"
+    assert canonical_key(tmp_path, "missing") == "missing"

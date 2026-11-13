@@ -238,8 +238,8 @@ def test_G_17_literals_through_parse_literal(doc):
         with pytest.raises(ValueError):
             values.parse_literal(text)
     # the same route for a field of kind "other"
-    doc.apply({"op": "node.set_field", "id": MOVE, "field": "goal", "value": "[1, 2.5, 'a']"})
-    assert doc.fields(MOVE)["goal"] == [1, 2.5, "a"]
+    doc.apply({"op": "node.set_field", "id": MOVE, "field": "goal", "value": "{'p': [1, 2.5, 'a']}"})
+    assert doc.fields(MOVE)["goal"] == {"p": [1, 2.5, "a"]}
     refused(doc, {"op": "node.set_field", "id": MOVE, "field": "goal", "value": "__import__('os')"}, "literal")
     refused(doc, {"op": "node.set_field", "id": MOVE, "field": "goal", "value": "x" * 2_000_001}, "longer")
     refused(doc, {"op": "node.set_field", "id": MOVE, "field": "goal", "value": "[" * 200 + "]" * 200}, "nested")
@@ -366,6 +366,9 @@ def test_node_set_field_inside_a_dictionary(doc):
     refused(doc, {"op": "node.set_field", "id": MOVE, "field": "goal", "path": "pose..x", "kind": "int", "value": 1}, "malformed")
     refused(doc, {"op": "node.set_field", "id": MOVE, "field": "speed", "path": "a", "kind": "int", "value": 1}, "dictionary")
     refused(doc, {"op": "node.set_field", "id": MOVE, "field": "goal", "path": "pose.x", "kind": "huge", "value": 1}, "kind")
+    doc.apply({"op": "node.set_field", "id": MOVE, "field": "goal", "value": None})
+    refused(doc, {"op": "node.set_field", "id": MOVE, "field": "goal", "path": "pose.x", "kind": "int", "value": 1},
+            "dictionary")
 
 
 def test_node_set_field_refusals(doc):
@@ -489,12 +492,7 @@ def test_paste(doc):
     assert again.op["nodes"][0]["title"] == "group_006"
     assert TreeDocument(doc.to_file(), CATALOG).to_file() == doc.to_file()
     refused(doc, {**op}, "in use")
-    fresh = [{**node, "id": new_id()} for node in op["nodes"][:2]]
-    refused(doc, {"op": "paste", "nodes": fresh, "connections": [{"parent": fresh[1]["id"], "child": fresh[0]["id"]}]},
-            "connections are invalid")
-    refused(doc, {"op": "paste", "nodes": fresh, "connections": [{"parent": SEQ, "child": fresh[0]["id"]}]},
-            "connections are invalid")
-    refused(doc, {"op": "paste", "nodes": [{"id": new_id(), "type": "Root"}], "connections": []}, "one Root")
+    refused(doc, {"op": "paste", "nodes": [{"id": new_id(), "type": "Root"}], "connections": []}, "nothing to paste")
     refused(doc, {"op": "paste", "nodes": [], "connections": []}, "needs nodes")
     twice = new_id()
     refused(doc, {"op": "paste", "nodes": [{"id": twice, "type": "Stop"}, {"id": twice, "type": "Stop"}], "connections": []},
@@ -556,3 +554,127 @@ def test_the_document_is_not_shared_with_the_data_it_was_loaded_from():
     document = TreeDocument(data, CATALOG)
     document.apply({"op": "node.set_field", "id": MOVE, "field": "goal", "path": "pose.x", "kind": "float", "value": "9"})
     assert data == original
+
+
+# ============================================================================== review findings
+def test_review_2_a_written_order_against_the_positions_is_warned():
+    data = tree()
+    document = TreeDocument({**data, "nodes": [node for node in data["nodes"] if node["type"] in ("Root", "Stop")],
+                             "connections": [], "version": 1}, CATALOG)
+    left = new_id()
+    document.apply({"op": "node.add", "node": {"id": left, "type": "Pause", "title": "left", "x": 0.0, "y": 400.0}})
+    document.apply({"op": "node.set_title", "id": STOP, "title": "right"})
+    document.apply({"op": "conn.add", "parent": ROOT, "child": STOP})
+    document.apply({"op": "conn.add", "parent": ROOT, "child": left})  # no order: appended, but drawn left
+    (warning,) = document.save_warnings()
+    assert "'Root'" in warning and "'right', 'left'" in warning and "left to right: 'left', 'right'" in warning
+    document.apply({"op": "node.move", "positions": {}, "orders": {ROOT: [left, STOP]}})
+    assert document.save_warnings() == []
+
+
+def test_review_3_widths_follow_the_title_and_the_fields():
+    """Widths measured with the widget 0.10.0 (Segoe UI 9 pt; Qt's offscreen fallback font)."""
+    nodes = [
+        {"id": ROOT, "type": "Root", "title": "Root", "x": 0.0, "y": 0.0, "composite": "Sequence", "memory": True},
+        {"id": SEQ, "type": "Sequence", "title": "Drive to the charging dock and wait", "x": 0.0, "y": 200.0, "memory": True},
+        {"id": SEL, "type": "Sequence", "title": "A", "x": 60.0, "y": 200.0, "memory": True},
+        {"id": MOVE, "type": "Mover", "title": "Mover", "x": 400.0, "y": 200.0, "fields": {}},
+        {"id": STOP, "type": "Stop", "title": "Stop", "x": 470.0, "y": 200.0, "fields": {}},
+        {"id": EVAL, "type": "Sub-Tree", "title": "Sub-Tree", "x": 2000.0, "y": 200.0, "fields": {"File": ""}},
+    ]
+    data = {"format": "behavior_tree_widget", "version": 1, "nodes": nodes,
+            "connections": [{"parent": ROOT, "child": child} for child in (SEQ, SEL, MOVE, STOP)]}
+    document = TreeDocument(data, CATALOG)
+    assert document.widget_widths(ROOT) == (119, 210)
+    assert document.widget_widths(SEQ) == (282, 582)
+    assert document.widget_widths(SEL) == (102, 174)
+    assert document.widget_widths(MOVE) == (288, 482)  # its float field's row
+    assert document.widget_widths(STOP) == (85, 130)
+    assert document.widget_widths(EVAL) == (221, 352)
+    (warning,) = document.save_warnings()
+    assert "left to right: 'A', 'Drive to the charging dock and wait', 'Stop', 'Mover'" in warning
+    document.apply({"op": "node.set_field", "id": MOVE, "field": "mode", "value": ["abcdefghijklmnopqrstuvwxyzabcdefghijkl"]})
+    assert document.widget_widths(MOVE) == (381, 716)
+
+
+def test_review_3_siblings_close_under_either_font_are_named():
+    data = tree()
+    stop = next(node for node in data["nodes"] if node["id"] == STOP)
+    document = TreeDocument({**data, "version": 1, "nodes": [data["nodes"][0], stop,
+                                                            {**stop, "id": "f" * 32, "type": "Pause", "title": "P", "x": 1630.0}],
+                             "connections": [{"parent": ROOT, "child": STOP}, {"parent": ROOT, "child": "f" * 32}]}, CATALOG)
+    (warning,) = document.save_warnings()
+    assert "'Stop' and 'P' below 'Root' are less than 40 pixels apart" in warning
+
+
+def test_review_4_a_rename_is_not_refused_for_a_stale_binding():
+    data = tree()
+    data["nodes"][8]["bindings"] = {"velocity": "counter"}  # names no field of Mover any more
+    document = TreeDocument(data, CATALOG)
+    ops = [item.op for item in document.rename_entry("counter", "count")]
+    assert {"op": "node.set_binding", "id": MOVE, "key": "velocity", "entry": "count"} in ops
+    assert document.fields(EVAL)["ValueName"] == "count" and document.fields(PRINT)["Source"] == "count"
+    assert [item.rev for item in document.rename_entry("count", "n")] == [6, 7, 8, 9, 10]
+
+
+@pytest.mark.parametrize("wire", ["5", "[1, 2]", "'text'", "True"])
+def test_review_5_values_the_file_could_not_keep_are_refused(doc, wire):
+    refused(doc, {"op": "node.set_field", "id": MOVE, "field": "goal", "value": wire}, "could not keep")
+    doc.apply({"op": "node.set_field", "id": MOVE, "field": "goal", "value": "(1, 2)"})  # the widget keeps it too
+    assert reloaded(doc).fields(MOVE)["goal"] == (1, 2)
+
+
+def test_review_5_a_call_action_goal_stays_a_dictionary(doc):
+    refused(doc, {"op": "node.set_field", "id": CALL, "field": "Goal", "value": "[1]"}, "could not keep")
+    doc.apply({"op": "node.set_field", "id": CALL, "field": "Goal", "value": "{'pose': {'x': 1.0}}"})
+    assert reloaded(doc).fields(CALL)["Goal"] == {"pose": {"x": 1.0}}
+
+
+def test_review_6_frozensets_and_tuple_literals_survive_a_paste_in_wire_form():
+    data = tree()
+    data["nodes"][8]["fields"]["goal"] = {"a": {"__frozenset__": [1, 2]}, "b": {"__tuple__": [3]}}
+    data["nodes"][6]["fields"]["LiteralValue"] = {"__tuple__": [1, 2]}
+    document = TreeDocument(data, CATALOG)
+    assert document.problems == []
+    for source in (MOVE, SET):
+        copy_id = new_id()
+        wire = json.loads(json.dumps({**document.node_to_wire(source, {"speed": "List"}), "id": copy_id}))
+        document.apply({"op": "paste", "encoding": "wire", "nodes": [wire], "connections": []})
+        assert document.file_item(copy_id)["fields"] == document.file_item(source)["fields"]
+    assert values.parse_literal("frozenset({frozenset({1}), 2})") == frozenset({frozenset({1}), 2})
+    assert values.parse_literal("frozenset()") == frozenset()
+    for unsafe in ("frozenset('ab')", "frozenset(x)", "frozenset(range(3))", "frozenset({1}, k=2)", "set.mro()"):
+        with pytest.raises(ValueError):
+            values.parse_literal(unsafe)
+
+
+def test_review_8_a_placeholder_pasted_in_wire_form_keeps_non_finite_numbers():
+    data = tree()
+    odd = {"id": "f" * 32, "type": "Odd", "title": "Odd", "x": 0.0, "y": 0.0,
+           "fields": {"v": float("nan"), "w": [float("inf"), float("-inf")]}, "__float__": "nan",
+           "k": {"__float__": "inf"}}
+    data["nodes"].append(odd)
+    document = TreeDocument(data, CATALOG)
+    wire = document.node_to_wire(odd["id"])
+    text = json.dumps(wire, allow_nan=False)  # a browser can parse it
+    copy_id = new_id()
+    document.apply({"op": "paste", "encoding": "wire", "nodes": [{**json.loads(text), "id": copy_id}], "connections": []})
+    saved = document.file_item(copy_id)
+    assert json.dumps({**saved, "id": odd["id"]}) == json.dumps(odd)
+
+
+def test_review_9_removing_a_connection_that_does_not_exist_is_refused(doc):
+    refused(doc, {"op": "conn.remove", "child": GROUP}, "no such connection")
+    refused(doc, {"op": "conn.remove", "parent": None, "child": "zz"}, "no such connection")
+    refused(doc, {"op": "conn.remove", "parent": SEQ, "child": PRINT}, "no such connection")
+
+
+def test_review_10_a_paste_leaves_out_a_root_and_invalid_connections(doc):
+    stop, pause = new_id(), new_id()
+    applied = doc.apply({"op": "paste", "encoding": "wire", "nodes": [
+        {**doc.node_to_wire(ROOT), "id": new_id()}, {"id": stop, "type": "Stop", "x": 0, "y": 0},
+        {"id": pause, "type": "Pause", "x": 0, "y": 0}],
+        "connections": [{"parent": stop, "child": pause}, {"parent": SEQ, "child": stop}]})
+    assert [node["id"] for node in applied.op["nodes"]] == [stop, pause] and applied.op["connections"] == []
+    assert len(applied.problems) == 3 and "Root" in applied.problems[0]
+    assert doc.parent(stop) is None and doc.node_type(doc.root_id) == "Root"

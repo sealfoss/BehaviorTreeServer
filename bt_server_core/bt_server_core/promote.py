@@ -25,6 +25,7 @@ from collections.abc import Iterable
 
 from .document import (
     GROUP,
+    REMOTE_SUB_TREE,
     NODE_SIZES,
     NOTES,
     PARALLEL,
@@ -35,7 +36,7 @@ from .document import (
     TreeDocument,
     clamp_position,
 )
-from .files import TREE_FORMAT, document_key, tree_file_name, tree_file_path
+from .files import TREE_FORMAT, document_key, is_absolute_name, tree_file_name, tree_file_path
 
 __all__ = ["INVALID_FILE_NAME_CHARACTERS", "promote"]
 
@@ -50,24 +51,25 @@ def _united(rects: Iterable[Rect]) -> Rect:
     return (min(r[0] for r in rects), min(r[1] for r in rects), max(r[2] for r in rects), max(r[3] for r in rects))
 
 
-def _check_name(document: TreeDocument, new_key: str, open_keys: Iterable[str]) -> str:
-    """The name of the new tree (its file name without ``_BT.json``), checked as the widget
-    checks a group name it promotes."""
+def _check_name(document: TreeDocument, new_key: str, open_keys: Iterable[str]) -> tuple[str, str]:
+    """The key and the name of the new tree (any of the widget's spellings: ``patrol``,
+    ``patrol_BT``, ``patrol.json``, ``cells/patrol_BT.json``), checked as the widget checks a
+    group name it promotes."""
     try:
-        normalised = document_key(new_key)
+        key = document_key(new_key)
     except ValueError as error:
         raise OpRefused(str(error)) from error
-    name = posixpath.basename(normalised)
-    if normalised != new_key or not name.strip():
+    name = posixpath.basename(key)
+    if not name.strip():
         raise OpRefused(f"{new_key!r} cannot name a tree; use a name such as 'patrol' or 'cells/patrol'")
     if INVALID_FILE_NAME_CHARACTERS.search(name) or name in (".", "..") or name.endswith("."):
         raise OpRefused(
             f"the name {name!r} cannot be used as a file name: it must not contain "
             '< > : " / \\ | ? * and must not end with a dot'
         )
-    if new_key == document.key or new_key in set(open_keys):
+    if key == document.key or key in set(open_keys):
         raise OpRefused(f"the name {name!r} names the file of this tree or of a tree containing it; choose another")
-    return name
+    return key, name
 
 
 def promote(
@@ -105,7 +107,7 @@ def promote(
         raise OpRefused("the tree is executing: a group cannot be promoted now")
     if not document.has_node(group_id) or document.node_type(group_id) != GROUP or document.is_placeholder(group_id):
         raise OpRefused("only a group of this tree can be promoted to a sub-tree")
-    name = _check_name(document, new_key, open_keys)
+    new_key, name = _check_name(document, new_key, open_keys)
     path = tree_file_path(root, new_key)
     if path.exists() and not overwrite:
         raise FileExistsError(f"'{tree_file_name(new_key)}' already exists")
@@ -168,13 +170,45 @@ def promote(
                 "run them in parallel"
             )
 
-    data = _subtree_file(document, nodes, members, root_children, parent, rect)
+    data = _subtree_file(document, nodes, members, root_children, parent, rect, new_key)
     new_document = TreeDocument(data, document.catalog, key=new_key)
     ops = _replacement_ops(document, group_id, name, new_key, members, inside, tops, root_children, parent, rect)
     return new_document.to_file(), ops
 
 
-def _subtree_file(document: TreeDocument, nodes, members, root_children, parent, rect) -> dict:
+def _relative(path: str, folder: str) -> str:
+    """``path`` (relative to the trees folder) relative to ``folder`` (likewise), POSIX."""
+    parts, base = path.split("/"), [part for part in folder.split("/") if part]
+    common = 0
+    while common < min(len(parts) - 1, len(base)) and parts[common] == base[common]:
+        common += 1
+    return "/".join([".."] * (len(base) - common) + parts[common:])
+
+
+def _moved_item(document: TreeDocument, node_id: str, new_key: str) -> dict:
+    """A node as the new file holds it: a Sub-Tree's or Remote Sub-Tree's ``File`` is relative
+    to the folder of the tree holding it, so it is written relative to the new tree's folder
+    (unchanged when that is the same folder, as the widget always promotes next to the tree)."""
+    item = document.file_item(node_id)
+    old_folder, new_folder = posixpath.dirname(document.key), posixpath.dirname(new_key)
+    fields = item.get("fields")
+    if (
+        old_folder == new_folder
+        or item["type"] not in (SUB_TREE, REMOTE_SUB_TREE)
+        or document.is_placeholder(node_id)
+        or not isinstance(fields, dict)
+        or not isinstance(fields.get("File"), str)
+        or not fields["File"].strip()
+        or is_absolute_name(fields["File"])
+    ):
+        return item
+    target = posixpath.normpath(posixpath.join(old_folder, fields["File"].strip().replace("\\", "/")))
+    if target == ".." or target.startswith("../"):
+        return item  # it cannot be followed (reported when loaded); kept as it is
+    return {**item, "fields": {**fields, "File": _relative(target, new_folder)}}
+
+
+def _subtree_file(document: TreeDocument, nodes, members, root_children, parent, rect, new_key: str) -> dict:
     """The new tree file: a Root over the top nodes (taking the parent's type and memory), then
     the group's contents; the Root is placed above them, centred over its children."""
     parent_type = document.node_type(parent) if parent is not None else None
@@ -206,7 +240,7 @@ def _subtree_file(document: TreeDocument, nodes, members, root_children, parent,
             "default_memory": document.config["default_memory"],
         },
         "view": {"zoom": zoom, "center": [round((shown[0] + shown[2]) / 2, 2), round((shown[1] + shown[3]) / 2, 2)]},
-        "nodes": [root_item, *(document.file_item(node_id) for node_id in members)],
+        "nodes": [root_item, *(_moved_item(document, node_id, new_key) for node_id in members)],
         "connections": connections,
     }
 
@@ -216,8 +250,7 @@ def _replacement_ops(document, group_id, name, new_key, members, inside, tops, r
     the place of the first top node; connect it to the parent there."""
     anchor = rect(root_children[0] if root_children else tops[0])
     width = NODE_SIZES[SUB_TREE][0]
-    folder = posixpath.dirname(document.key)
-    file_name = posixpath.relpath(tree_file_name(new_key), folder) if folder else tree_file_name(new_key)
+    file_name = _relative(tree_file_name(new_key), posixpath.dirname(document.key))
     node_id = uuid.uuid4().hex
     node = {
         "id": node_id,

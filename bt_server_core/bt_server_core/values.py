@@ -450,15 +450,27 @@ def compare(operator: str, a: Any, b: Any) -> bool:
 
 
 class _NonFiniteNames(ast.NodeTransformer):
-    """Accept ``nan`` / ``inf`` (as written by ``repr``) inside container literals."""
+    """Accept what ``repr`` writes for values that have no literal of their own: ``nan`` / ``inf``,
+    and ``frozenset()`` / ``frozenset({...})`` around a literal (no other call is accepted)."""
 
     NAMES = {"nan": float("nan"), "inf": float("inf"), "infinity": float("inf")}
+    _LITERALS = (ast.Set, ast.List, ast.Tuple, ast.Constant)
 
     def visit_Name(self, node: ast.Name) -> ast.AST:  # noqa: N802 - ast API
         value = self.NAMES.get(node.id.lower())
         if value is None:
             return node
         return ast.copy_location(ast.Constant(value=value), node)
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:  # noqa: N802 - ast API
+        self.generic_visit(node)  # inner frozensets first
+        if not (isinstance(node.func, ast.Name) and node.func.id == "frozenset" and not node.keywords
+                and len(node.args) <= 1 and all(isinstance(arg, self._LITERALS) for arg in node.args)):
+            return node  # literal_eval refuses it
+        if node.args and isinstance(node.args[0], ast.Constant) and not isinstance(node.args[0].value, (set, frozenset)):
+            return node  # frozenset('ab') is not what repr writes
+        items = ast.literal_eval(ast.fix_missing_locations(node.args[0])) if node.args else ()
+        return ast.copy_location(ast.Constant(value=frozenset(items)), node)
 
 
 def _depth(node: ast.AST) -> int:
@@ -719,8 +731,12 @@ def to_wire(type_name: str, value: Any) -> Any:
     return safe_repr(value)
 
 
-def from_wire(type_name: str, wire: Any) -> Any:
+def from_wire(type_name: str, wire: Any, *, exact: bool = False) -> Any:
     """The value of an entry type from its browser form, checked for the type.
+
+    ``exact``: a container keeps the Python type it was written with when that type belongs to
+    the entry type (a tuple for List, a frozenset for Set) instead of becoming a list or a set,
+    as a literal of an Evaluation or Set node does in the widget.
 
     Raises:
         ValueError: the wire value does not give a value of that type; the message says why.
@@ -739,7 +755,11 @@ def from_wire(type_name: str, wire: Any) -> Any:
     elif type_name in CONTAINER_TYPES:
         if not isinstance(wire, str):
             raise ValueError(f"{type_name} values are sent as Python literal text")
-        return parse_literal(wire, type_name)
+        value = parse_literal(wire, type_name)
+        if exact and wire.strip():
+            written = parse_literal(wire)
+            return written if infer_type(written) == type_name else value
+        return value
     try:
         return coerce_value(type_name, wire)
     except (TypeError, ValueError) as error:
@@ -756,8 +776,9 @@ def typed_to_wire(value: Any, type_name: str | None = None) -> dict:
     return {"type": type_name, "value": to_wire(type_name, value)}
 
 
-def typed_from_wire(data: Any) -> Any:
+def typed_from_wire(data: Any, *, exact: bool = False) -> Any:
     """Inverse of :func:`typed_to_wire`. ``None`` and ``{"value": null}`` give ``None``.
+    ``exact``: see :func:`from_wire`.
 
     Raises:
         ValueError: malformed, or the value does not fit its type.
@@ -768,7 +789,7 @@ def typed_from_wire(data: Any) -> Any:
         raise ValueError("a typed value is {'type': ..., 'value': ...}")
     if data.get("value") is None:
         return None
-    return from_wire(canonical_type(data["type"]), data["value"])
+    return from_wire(canonical_type(data["type"]), data["value"], exact=exact)
 
 
 def field_kind_of(default: Any) -> str:

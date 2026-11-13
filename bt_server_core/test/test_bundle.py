@@ -100,7 +100,7 @@ def test_build_bundle_resolves_sub_trees_and_remote_trees(trees):
     assert robot_nodes[names["remote"]]["tree"] == "dock"
     assert robot_nodes[names["note"]]["text"] == "hi" and robot_nodes[names["group"]]["width"] == 600
     patrol = nodes_of(bundle, "cells/patrol")
-    assert "tree" not in patrol[names["itself"]]  # a sub-tree that contains itself is not put in again
+    assert patrol[names["itself"]]["tree"] == "cells/patrol"  # the engine refuses it per chain
     assert patrol[names["arm"]]["tree"] == "common/arm"
     assert "tree" not in patrol[names["missing"]]
     assert nodes_of(bundle, "dock")[names["back"]]["tree"] == "robot"  # the remote run is a run of its own
@@ -113,8 +113,7 @@ def test_a_sub_tree_cycle_fails_only_the_node_that_closes_it(tmp_path):
     write_tree_file(tmp_path / "a_BT.json", tree_file([node(a_sub, "Sub-Tree", fields={"File": "b"})], [(a_root, a_sub)], a_root))
     write_tree_file(tmp_path / "b_BT.json", tree_file([node(b_sub, "Sub-Tree", fields={"File": "a"})], [(b_root, b_sub)], b_root))
     bundle = build_bundle("a", getter(tmp_path))
-    assert nodes_of(bundle, "a")[a_sub]["tree"] == "b"
-    assert "tree" not in nodes_of(bundle, "b")[b_sub]
+    assert nodes_of(bundle, "a")[a_sub]["tree"] == "b" and nodes_of(bundle, "b")[b_sub]["tree"] == "a"
     findings = validate_bundle(bundle, [], CATALOG)
     assert findings == [{"path": f"tree:b/{b_sub}", "severity": "error", "text": "the sub-tree 'a' contains itself"}]
 
@@ -223,3 +222,44 @@ def test_validate_blackboard_sources_and_object_names():
         {"path": "blackboard:whole", "severity": "error", "text": "the whole message needs a Dictionary entry"},
         {"path": "blackboard:node", "severity": "error", "text": "the entry 'node' has the name of an Object entry of the executor"},
     ]
+
+
+def test_review_1_self_containment_is_decided_per_chain():
+    """R -> [X, Y]; X (Selector) -> [Y, a leaf that succeeds]; Y -> X. On R -> X -> Y the node
+    Y -> X closes the cycle and fails, X falls back to its leaf; on R -> Y -> X it is X -> Y that
+    fails. The widget succeeds; so must the run of the bundle."""
+    from engine_helpers import EngineRun
+
+    from bt_server_core.engine import Outcome
+
+    def tree(composite: str, *files: str, leaf: bool = False) -> dict:
+        root = "r" * 32
+        items = [node(str(index) * 32, "Sub-Tree", 300.0 * index, title=f"to {name}", fields={"File": f"{name}_BT.json"})
+                 for index, name in enumerate(files)]
+        if leaf:
+            items.append(node("s" * 32, "TestS", 900.0, fields={}))
+        data = tree_file(items, [(root, item["id"]) for item in items], root)
+        data["nodes"][0]["composite"] = composite
+        return data
+
+    catalog = [*CATALOG, {"type": "TestS", "title": "TestS", "kind": "leaf", "fields": []}]
+    documents = {key: TreeDocument(data, catalog, key=key) for key, data in
+                 {"R": tree("Sequence", "X", "Y"), "X": tree("Selector", "Y", leaf=True), "Y": tree("Sequence", "X")}.items()}
+    bundle = build_bundle("R", documents.get)
+    assert [item.get("tree") for item in bundle["trees"]["Y"]["nodes"] if item["type"] == "Sub-Tree"] == ["X"]
+    assert [item.get("tree") for item in bundle["trees"]["X"]["nodes"] if item["type"] == "Sub-Tree"] == ["Y"]
+    found = {(item["path"], item["text"]) for item in validate_bundle(bundle, [], catalog)}
+    assert found == {(f"tree:Y/{'0' * 32}", "the sub-tree 'X' contains itself"),
+                     (f"tree:X/{'0' * 32}", "the sub-tree 'Y' contains itself")}
+    run = EngineRun("", bundle=bundle).start()
+    assert run.result is not None and run.result.outcome == Outcome.SUCCEEDED
+
+
+def test_review_10_bundle_keys_follow_the_documents_spelling(tmp_path):
+    r, sub = ids(2)
+    write_tree_file(tmp_path / "robot_BT.json", tree_file([node(sub, "Sub-Tree", fields={"File": "Robot_BT.json"})],
+                                                          [(r, sub)], r))
+    documents = {"robot": TreeDocument(load_tree(tmp_path, "robot").data, CATALOG, key="robot")}
+    bundle = build_bundle("robot", lambda key: documents.get(key.lower()))
+    assert list(bundle["trees"]) == ["robot"] and nodes_of(bundle, "robot")[sub]["tree"] == "robot"
+    assert [item["text"] for item in validate_bundle(bundle, [], CATALOG)] == ["the sub-tree 'robot' contains itself"]
