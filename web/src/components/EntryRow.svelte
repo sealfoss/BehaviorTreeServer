@@ -86,6 +86,7 @@
   />
   <span class="bb-col-source">
     <button type="button" onclick={() => openDialog('source')} disabled={entry.type === 'Object'} data-testid="bb-source-{entry.name}">Source…</button>
+    {#if entry.problem}<span class="bb-problem" title={entry.problem} data-testid="bb-problem-{entry.name}">⚠ {entry.problem}</span>{/if}
     {#if fed}<span class="bb-topic" title="{entry.source?.type} {entry.source?.field ?? ''}">{entry.source?.topic}</span>{/if}
     {#if fed && ageText}<span class="bb-age" data-testid="bb-age-{entry.name}">{ageText}</span>{/if}
   </span>

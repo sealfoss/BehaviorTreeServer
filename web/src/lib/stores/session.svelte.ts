@@ -92,6 +92,7 @@ export class Session {
         return this.onOp(message);
       case 'st':
         this.run.applySt(String(message.exec), message as unknown as StBody);
+        if (message.exec === this.executors.attached && typeof message.starting === 'boolean') this.run.starting = message.starting;
         return;
       case 'bb':
         if (message.exec === undefined || message.exec === this.executors.attached) this.blackboard.apply(message as BbChanges);
@@ -220,6 +221,7 @@ export class Session {
 
   private onRun(message: RunMessage): void {
     this.run.applyRun(message);
+    if (message.exec === this.executors.attached && message.event === 'started') this.log.clear();
     if (message.exec === this.executors.attached && message.event === 'ended') {
       const outcome = ['', 'Succeeded', 'Failed', 'Stopped', 'Error'][message.outcome ?? 0] ?? '';
       if (outcome) this.ui.notify(message.outcome === 4 ? 'error' : 'info', `Execution finished: ${outcome}${message.message ? ` (${message.message})` : ''}`);

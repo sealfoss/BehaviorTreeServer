@@ -29,7 +29,9 @@
     }
     return measure;
   }
-  const pixels = $derived(fittedPixelSize(text || PLACEHOLDER, width - 2 * TEXT_MARGIN, height - 2 * TEXT_MARGIN, probe()));
+  // The text box: the note less its 1 px border and the text margin on each side.
+  const BORDER = 1;
+  const pixels = $derived(fittedPixelSize(text || PLACEHOLDER, width - 2 * (BORDER + TEXT_MARGIN), height - 2 * (BORDER + TEXT_MARGIN), probe()));
 
   let timer: ReturnType<typeof setTimeout> | null = null;
   let draft: string | null = null;

@@ -119,6 +119,8 @@ function valueToWire(type: string, value: unknown): unknown {
 export interface PastePlan {
   nodes: WireNode[];
   connections: Connection[];
+  /** The copies' sizes as the originals were drawn (or estimated): new id -> [w, h]. */
+  sizes: Record<string, [number, number]>;
 }
 
 /**
@@ -135,6 +137,7 @@ export function planPaste(
   const ids = new Map<string, string>();
   const nodes: WireNode[] = [];
   const rects: Rect[] = [];
+  const sizes: Record<string, [number, number]> = {};
   for (const item of data.nodes) {
     if (item.type === 'Root' || ids.has(item.id)) continue;
     const id = newId();
@@ -146,6 +149,7 @@ export function planPaste(
     const { w, h } = size ? { w: size[0], h: size[1] } : estimate(wire);
     nodes.push({ ...wire, id, x, y });
     rects.push({ x, y, w, h });
+    sizes[id] = [Math.round(w), Math.round(h)];
   }
   const offset = nearestFreeOffset(rects, obstacles);
   for (const node of nodes) {
@@ -155,5 +159,5 @@ export function planPaste(
   const connections = data.connections
     .filter((c) => ids.has(c.parent) && ids.has(c.child))
     .map((c) => ({ parent: ids.get(c.parent)!, child: ids.get(c.child)! }));
-  return { nodes, connections };
+  return { nodes, connections, sizes };
 }

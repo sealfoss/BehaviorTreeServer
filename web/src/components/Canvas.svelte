@@ -399,7 +399,7 @@
         const value = field.default;
         if (field.kind === 'float') node.fields[field.name] = typeof value === 'number' ? doubleToWire(value) : value;
         else if (field.kind === 'other') node.fields[field.name] = value === null || value === undefined ? null : fileValueToPy(value);
-        else node.fields[field.name] = structuredClone(value);
+        else node.fields[field.name] = $state.snapshot(value); // the catalog is reactive state: a plain copy
         if (field.kind === 'choice') (node.field_selections ??= {})[field.name] = 0;
       }
     }
@@ -545,7 +545,9 @@
     // The new file goes next to the tree's own file (the widget's rule).
     const folder = doc.key.includes('/') ? doc.key.slice(0, doc.key.lastIndexOf('/') + 1) : '';
     // Done by the gateway, which sends the resulting ordinary operations back (contract 5.3).
-    await session.sendOp(doc.key, { op: 'group.promote', id: node.id, name: folder + node.title }, false);
+    // The sizes as drawn let the gateway order the new tree's children as the canvas does.
+    const sizes = Object.fromEntries(doc.nodes.map((item) => [item.id, [Math.round(rectOf(item).w), Math.round(rectOf(item).h)]]));
+    await session.sendOp(doc.key, { op: 'group.promote', id: node.id, name: folder + node.title, sizes }, false);
   }
 
   // ------------------------------------------------------------------------------ keyboard
@@ -630,7 +632,7 @@
     const obstacles = doc.nodes.map(rectOf);
     const plan = planPaste(data, obstacles, newId, (type) => session.catalog.get(type), estimateSize);
     if (!plan.nodes.length) return;
-    void session.sendOp(doc.key, { op: 'paste', nodes: plan.nodes, connections: plan.connections });
+    void session.sendOp(doc.key, { op: 'paste', nodes: plan.nodes, connections: plan.connections, encoding: 'wire', sizes: plan.sizes });
     view.select(plan.nodes.map((node) => node.id));
     revealNodes(plan.nodes);
   }

@@ -82,6 +82,8 @@ export interface Entry {
   freshness: 'ok' | 'nodata' | 'stale' | null;
   age: number | null;
   truncated: boolean;
+  /** Why the entry's source cannot feed it (QoS, type, field), or null. */
+  problem?: string | null;
 }
 
 export interface CatalogField {
@@ -130,6 +132,8 @@ export interface StBody {
   outcome: number;
   message: string;
   v: string;
+  /** The session is between the click on Execute and the goal's acceptance (design 9.5). */
+  starting?: boolean;
 }
 
 export interface RunMessage {

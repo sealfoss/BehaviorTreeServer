@@ -1067,6 +1067,13 @@ label.check {
   color: var(--muted);
 }
 
+.bb-problem {
+  color: #b06d00;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .bb-col-order {
   display: flex;
   gap: 2px;

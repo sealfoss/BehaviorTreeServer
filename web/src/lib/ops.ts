@@ -56,9 +56,18 @@ function applyOrders(doc: TreeDocument, orders: unknown): void {
   }
 }
 
+/** A plain copy (values handed in from reactive state are proxies, which structuredClone refuses). */
+function clone<T>(value: T): T {
+  try {
+    return structuredClone(value);
+  } catch {
+    return JSON.parse(JSON.stringify(value)) as T;
+  }
+}
+
 function upsertNode(doc: TreeDocument, node: WireNode): void {
   const index = doc.nodes.findIndex((item) => item.id === node.id);
-  const copy = structuredClone(node);
+  const copy = clone(node);
   if (index >= 0) doc.nodes[index] = copy;
   else doc.nodes.push(copy);
 }
@@ -117,7 +126,7 @@ export function applyOp(doc: TreeDocument, op: Op): ApplyResult {
         if (updated === null) return 'resync';
         node.fields[field] = updated;
       } else {
-        node.fields[field] = structuredClone(op.value);
+        node.fields[field] = clone(op.value);
       }
       return 'applied';
     }
