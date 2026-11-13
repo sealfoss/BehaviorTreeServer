@@ -296,6 +296,8 @@ save {doc, view?}         -> ok {"warnings": [...]}         # the document shown
 save_as {doc, name, replace?, view?}
 rename {name, new_name}   delete {name}
 zoom_in {doc, node, path} -> ok {"doc": key, "document": <document>}   # opens the Sub-Tree's (or Remote Sub-Tree's) file
+zoom_in {doc, node, path, file, create: true}   # file (a tree name relative to trees_dir) does not exist: created
+                          # as a tree holding only a Root (no _BB.json), the node's File set to it, and opened
 go_back {doc}             -> ok                                        # this browser no longer shows doc
 revert {doc}              recover {doc, accept: bool}
 ```
@@ -327,6 +329,9 @@ executors                          -> ok {"executors": [...]}
      "run":<run>|null,"st":<st body>,"details":{index:{kind:value}},"log":{"first":seq,"lines":[...]},
      "recovery":[keys],"attached":n,"findings":[...]}
 {"t":"doc","doc":key,"event":"opened"|"saved"|"reverted"|"closed"|"resync"|"renamed","document":<document>|null}
+{"t":"doc","doc":key,"event":"recovered"|"recovery_declined","document":<document>|null}
+     # to every browser when one answers the recovery offer of key: drop the offer; "recovered"
+     # carries the recovered document, "recovery_declined" the open one (null if not open)
 {"t":"catalog","exec","types":[...]}
 {"t":"op",...}  {"t":"ok","cid",...}  {"t":"no","cid","reason",...}
 {"t":"st","exec","run_id":hex|null,"state","loop","cancelling","unsettled","outcome","message","v":"2210400"}

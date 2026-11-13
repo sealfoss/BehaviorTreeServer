@@ -57,7 +57,7 @@ from .client import Client
 from .documents import DocumentStore, new_tree_data, write_json
 from .link import APPLIED, NO_RUN, CommandRefused, LinkDown, LinkFactory
 from .security import allow
-from .session import Reply, Session
+from .session import Reply, Session, derived_edits
 from .settings import Settings
 from .wire import log_line, value_to_wire
 
@@ -278,12 +278,15 @@ class Gateway:
             return
         node_id, field = op["id"], op["field"]
         if op["op"] == "node.set_selection":
-            sent = {"op": "node.set_selection", "tree": document.key, "id": node_id, "field": field,
-                    "index": op.get("index")}
+            sent = [{"op": "node.set_selection", "tree": document.key, "id": node_id, "field": field,
+                     "index": op.get("index")}]
         else:
-            sent = {"op": "node.set_field", "tree": document.key, "id": node_id, "field": field,
-                    "value": probe.fields(node_id).get(field)}
-        answers = [await owner.send_edit(dict(sent)) for owner in owners]
+            derived = derived_edits(probe, op, entry_types)
+            for item in derived:
+                probe.apply(item, entry_types=entry_types)
+            sent = [{"op": "node.set_field", "tree": document.key, "id": node_id, "field": name,
+                     "value": probe.fields(node_id).get(name)} for name in [field, *(d["field"] for d in derived)]]
+        answers = [await owner.send_edit([dict(item) for item in sent]) for owner in owners]
         refused = [message for code, message in answers if code not in (APPLIED, NO_RUN)]
         if refused:
             reply.no(refused[0] or "the executor refused the change")
@@ -296,7 +299,10 @@ class Gateway:
                 reply.no(error.reason)
                 return
             self.broadcast_op(document.key, applied.op, applied.rev, reply.client.id, reply.cid)
-            reply.ok(rev=applied.rev)
+            for item in derived_edits(document, op, entry_types):
+                follow = document.apply(item, entry_types=entry_types)
+                self.broadcast_op(document.key, follow.op, follow.rev, reply.client.id, None)
+            reply.ok(rev=document.rev)
 
     def recipients(self, key: str) -> list[Client]:
         """The browsers that show the document ``key``."""
@@ -902,9 +908,14 @@ class Gateway:
         if isinstance(chosen, str) and chosen.strip():
             key = self.tree_key(chosen)
             if find_tree_file(self.trees_dir, key) is None and self.docs.get(key) is None:
-                reply.no(f"there is no tree named {key}",
-                         question={"kind": "choose_file", "node": node_id, "file": chosen})
-                return
+                if message.get("create") is not True:
+                    reply.no(f"there is no tree named {key}",
+                             question={"kind": "choose_file", "node": node_id, "file": chosen})
+                    return
+                # the widget's offer: a new tree holding only a Root, without a blackboard file
+                created = TreeDocument(new_tree_data(uuid.uuid4().hex), session.catalog, key=key)
+                await asyncio.to_thread(_write_new_tree, self.docs.path(key), created.to_file())
+                log.info("Zoom In created %r by %s", key, client.address)
             folder = posixpath.dirname(holder.key)
             relative = posixpath.relpath(tree_file_name(key), folder) if folder else tree_file_name(key)
             if relative != current:
@@ -960,6 +971,7 @@ class Gateway:
             return
         if message.get("accept") is not True:
             await self.docs.answer_offer(key)
+            self._recovery_answered(key, "recovery_declined", self.docs.get(key))
             reply.ok()
             return
         if self.run_owner(key) is not None:
@@ -978,8 +990,17 @@ class Gateway:
             client.shown.add(key)
         await self.docs.answer_offer(key)
         self.docs.changed(document)
-        self.doc_event(key, "resync", document, [client])
+        self._recovery_answered(key, "recovered", document)
         reply.ok(doc=key, document=document.to_wire(session.board.types()))
+
+    def _recovery_answered(self, key: str, event: str, document: TreeDocument | None) -> None:
+        """The offer of ``key`` was answered: every browser drops it (``recovered`` carries the
+        recovered document; ``recovery_declined`` the open one, if any)."""
+        for other in self.clients.values():
+            if other.session is not None:
+                types = other.session.board.types()
+                other.push({"t": "doc", "doc": key, "event": event,
+                            "document": document.to_wire(types) if document is not None else None})
 
     # ================================================================== Promote to Sub-Tree
     async def promote(self, session: Session, reply: Reply, client: Client, document: TreeDocument, op: dict) -> None:

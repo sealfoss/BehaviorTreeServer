@@ -37,9 +37,17 @@ from typing import TYPE_CHECKING, Any
 
 from bt_server_core.blackboard import BlackboardSnapshot, OpError, new_entry_id
 from bt_server_core.bundle import REMOTE_SUB_TREE, build_bundle, sub_bundle
-from bt_server_core.document import STRUCTURAL_OPS, OpRefused
+from bt_server_core.document import STRUCTURAL_OPS, OpRefused, TreeDocument
 from bt_server_core.files import blackboard_file_path
-from bt_server_core.values import canonical_type, decode_value, equal_values, from_wire
+from bt_server_core.values import (
+    CONTAINER_TYPES,
+    canonical_type,
+    convert_literal,
+    decode_value,
+    equal_values,
+    from_wire,
+    typed_to_wire,
+)
 
 from .board import FileWriter, GatewayBoard, board_file_data
 from .documents import write_json
@@ -73,10 +81,40 @@ SNAPSHOT_LOG = 500
 RESULT_GRACE = 3.0
 #: Seconds without a status during a run after which the executor counts as lost (design 16).
 LOST_AFTER = 2.0
+#: Entry types a literal of Evaluation and Set can have (the widget's ``LITERAL_TYPES``).
+LITERAL_TYPES = frozenset(("Integer", "Double", "String", "Bool")) | CONTAINER_TYPES
 #: Operations that go to the executor during a run (design 9.3: the executor holds the fields).
 FORWARDED_OPS = frozenset(("node.set_field", "node.set_selection"))
 #: Operations refused during a run: a leaf reads them when it starts.
 BETWEEN_RUNS_OPS = frozenset(("node.set_binding", "node.set_output", "node.set_option"))
+
+
+def derived_edits(document: TreeDocument, op: dict, entry_types: dict[str, str]) -> list[dict]:
+    """What choosing the entry of an Evaluation or Set node also changes, as the widget does it
+    (``_on_value_name_chosen``): ``CompareTo`` is cleared unless it names another entry of the
+    same type, and ``LiteralValue`` is converted to the entry's type. Applied after the
+    ``node.set_field`` of ``ValueName`` as operations of their own, so that every browser, which
+    applies only the operations it is sent, sees them."""
+    if op.get("op") != "node.set_field" or op.get("field") != "ValueName" or op.get("path") is not None:
+        return []
+    node_id = op.get("id")
+    if not isinstance(node_id, str) or not document.has_node(node_id) or document.is_placeholder(node_id) \
+            or document.node_type(node_id) not in ("Evaluation", "Set"):
+        return []
+    fields = document.fields(node_id)
+    name = fields.get("ValueName")
+    new_type = entry_types.get(name) if isinstance(name, str) else None
+    edits = []
+    compare = fields.get("CompareTo")
+    if isinstance(compare, str) and compare and (compare == name or entry_types.get(compare) != new_type):
+        edits.append({"op": "node.set_field", "id": node_id, "field": "CompareTo", "value": None})
+    if new_type in LITERAL_TYPES:
+        literal = fields.get("LiteralValue")
+        converted = convert_literal(literal, new_type)
+        if type(converted) is not type(literal) or not equal_values(literal, converted):
+            edits.append({"op": "node.set_field", "id": node_id, "field": "LiteralValue",
+                          "value": typed_to_wire(converted, new_type)})
+    return edits
 
 
 def run_nodes(bundle: dict) -> set[tuple[str, str]]:
@@ -406,7 +444,15 @@ class Session:
             return
         self.gw.broadcast_op(key, applied.op, applied.rev, client.id, reply.cid)
         extra = {"reorder": applied.reorder} if applied.reorder else {}
-        reply.ok(rev=applied.rev, **extra)
+        rev = applied.rev
+        for derived in derived_edits(document, op, self.board.types()):  # each an op of its own
+            try:
+                follow = document.apply(derived, running=bool(owners), entry_types=self.board.types())
+            except OpRefused:
+                continue
+            self.gw.broadcast_op(key, follow.op, follow.rev, client.id, None)
+            rev = follow.rev
+        reply.ok(rev=rev, **extra)
         if name == "doc.set_config":
             for owner in owners:
                 if owner.own_active() and key == owner.root:
@@ -426,16 +472,21 @@ class Session:
         """Whether the own run executes the leaf ``node_id`` of the tree ``key``."""
         return isinstance(node_id, str) and (key, node_id) in self.run_nodes
 
-    async def send_edit(self, op: dict) -> tuple[int, str]:
-        """Send a field or choice edit to the executor; the document follows when it comes back."""
-        target = (op["tree"], op["id"], op["field"], "selection" if op["op"] == "node.set_selection" else "value")
-        self._pending_fields[target] = self._pending_fields.get(target, 0) + 1
+    async def send_edit(self, ops: list[dict]) -> tuple[int, str]:
+        """Send field or choice edits (of one node) to the executor in one call; the document
+        follows when they come back."""
+        targets = [(op["tree"], op["id"], op["field"], "selection" if op["op"] == "node.set_selection" else "value")
+                   for op in ops]
+        for target in targets:
+            self._pending_fields[target] = self._pending_fields.get(target, 0) + 1
         try:
-            code, message = await self.link.apply([dict(op, tree=self._bundle_keys.get(op["tree"], op["tree"]))])
+            code, message = await self.link.apply([dict(op, tree=self._bundle_keys.get(op["tree"], op["tree"]))
+                                                   for op in ops])
         except LinkDown as error:
             code, message = -1, f"the executor cannot be reached: {error}"
         if code != APPLIED:
-            self._release_field(target)
+            for target in targets:
+                self._release_field(target)
         return code, message
 
     def _release_field(self, target: tuple[str, str, str, str]) -> bool:

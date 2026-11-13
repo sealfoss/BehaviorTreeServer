@@ -419,3 +419,89 @@ async def test_review_low_keys_in_the_case_on_disk(gw: Harness, monkeypatch) -> 
     assert gw.gateway.tree_key("ROBOT_BT.json") == "robot"
     reply = await browser.request("file", action="save_as", doc="robot", name="ROBOT")
     assert reply["t"] == "ok" and gw.session().root == "robot"
+
+
+# ---------------------------------------------------------------------------------------- audit of the page
+async def test_audit_zoom_in_creates_a_missing_sub_tree(gw: Harness) -> None:
+    browser = await gw.browser()
+    root = await gw.new_tree(browser, "cells/robot")
+    sub = await gw.add(browser, "cells/robot", "Sub-Tree", root, fields={"File": "patrol_BT.json"})
+    reply = await browser.request("file", action="zoom_in", doc="cells/robot", node=sub, path=sub)
+    assert reply["t"] == "no" and reply["question"] == {"kind": "choose_file", "node": sub, "file": "patrol_BT.json"}
+    reply = await browser.request("file", action="zoom_in", doc="cells/robot", node=sub, path=sub, file="cells/patrol")
+    assert reply["t"] == "no" and reply["question"]["kind"] == "choose_file"  # without create: asked again
+    reply = await browser.request("file", action="zoom_in", doc="cells/robot", node=sub, path=sub, file="cells/patrol",
+                                  create=True)
+    assert reply["t"] == "ok" and reply["doc"] == "cells/patrol"
+    assert [node["type"] for node in reply["document"]["nodes"]] == ["Root"]
+    folder = gw.settings.trees_dir / "cells"
+    assert (folder / "patrol_BT.json").is_file() and not (folder / "patrol_BB.json").exists()
+    assert gw.doc("cells/robot").fields(sub)["File"] == "patrol_BT.json"
+
+
+async def evaluation_with_double_literal(gw: Harness, browser, parent: str) -> str:  # noqa: ANN001
+    await gw.bb_add(browser, "n", "Integer", 1)
+    await gw.bb_add(browser, "d", "Double", "1.0")
+    await gw.bb_add(browser, "d2", "Double", "2.0")
+    return await gw.add(browser, "robot", "Evaluation", parent, x=100, fields={
+        "ValueName": "d", "CompareTo": "d2", "LiteralValue": {"type": "Double", "value": "90.0"},
+        "Operator": "==", "Wait": False, "WaitTimeout": "0.0"})
+
+
+async def test_audit_choosing_the_entry_sends_the_converted_literal(gw: Harness) -> None:
+    browser = await gw.browser()
+    root = await gw.new_tree(browser, "robot")
+    evaluation = await evaluation_with_double_literal(gw, browser, root)
+    start = browser.mark()
+    reply = await gw.op(browser, "robot", {"op": "node.set_field", "id": evaluation, "field": "ValueName",
+                                           "value": "n"})
+    assert reply["t"] == "ok" and reply["rev"] == gw.doc("robot").rev
+    ops = [(m["op"]["field"], m["op"]["value"]) for m in browser.all("op", start)]
+    assert ops == [("ValueName", "n"), ("CompareTo", None), ("LiteralValue", {"type": "Integer", "value": 90})]
+    fields = gw.doc("robot").fields(evaluation)
+    assert fields["LiteralValue"] == 90 and type(fields["LiteralValue"]) is int and fields["CompareTo"] is None
+
+
+async def test_audit_choosing_the_entry_during_a_run_converts_the_literal_there_too(gw: Harness) -> None:
+    browser = await gw.browser()
+    root = await gw.new_tree(browser, "robot")
+    sequence = await gw.add(browser, "robot", "Sequence", root, memory=True)
+    await gw.add(browser, "robot", "Hold", sequence, x=-100, fields={"Seconds": "0.4", "Label": "a"})
+    evaluation = await evaluation_with_double_literal(gw, browser, sequence)
+    start = browser.mark()
+    assert (await browser.request("cmd", name="execute"))["t"] == "ok"
+    await browser.wait_for(lambda m: m["t"] == "st" and m["state"] == 1, start=start)
+    reply = await gw.op(browser, "robot", {"op": "node.set_field", "id": evaluation, "field": "ValueName",
+                                           "value": "n"})
+    assert reply["t"] == "ok"
+    await browser.wait_for(lambda m: m["t"] == "op" and m["by"] == "executor"
+                           and m["op"].get("field") == "LiteralValue", start=start)
+    assert gw.doc("robot").fields(evaluation)["LiteralValue"] == 90
+    back = {m["op"]["field"]: m["op"]["value"] for m in browser.all("op", start) if m["by"] == "executor"}
+    assert back == {"ValueName": "n", "CompareTo": None, "LiteralValue": {"type": "Integer", "value": 90}}
+    ended = await browser.wait_for(lambda m: m["t"] == "run" and m["event"] == "ended", start=start)
+    assert ended["outcome"] == 2  # n (1) == 90 fails: the run used the converted literal and the entry n
+
+
+@pytest.mark.parametrize("accept", [True, False])
+async def test_audit_recovery_answer_reaches_every_browser(start_gateway, settings, accept: bool) -> None:
+    gw, first, changed, recovery = await restart_with_recovery(start_gateway, settings)
+    second = await gw.browser()
+    assert second.snapshot["recovery"] == ["robot"]
+    mark = second.mark()
+    reply = await first.request("file", action="recover", doc="robot", accept=accept)
+    assert reply["t"] == "ok"
+    event = await second.wait_for(lambda m: m["t"] == "doc" and m["doc"] == "robot", start=mark)
+    assert event["event"] == ("recovered" if accept else "recovery_declined")
+    has_change = any(node["id"] == changed for node in event["document"]["nodes"])
+    assert has_change is accept
+    assert (await gw.browser()).snapshot["recovery"] == []
+
+
+async def test_audit_no_recovery_offer_without_a_restart(gw: Harness) -> None:
+    browser = await gw.browser()
+    root = await gw.new_tree(browser, "robot")
+    await gw.add(browser, "robot", "Stop", root)
+    recovery = gw.settings.trees_dir / ".recovery" / "robot_BT.json"
+    await gw.until(lambda: recovery.is_file())
+    assert (await gw.browser()).snapshot["recovery"] == []
