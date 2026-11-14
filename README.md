@@ -36,6 +36,7 @@ On Ubuntu 26.04:
                                 # the Python environment .venv (--system-site-packages), the colcon build,
                                 # and settings for this machine in config/
 ./run.sh                        # executor /<hostname>/bt_executor and the gateway on http://<LAN address>:8080/
+                                # and http://bt-<hostname>.local:8080/ while it runs
 ./setup_system_service.sh       # build into /opt/bt_server, user btserver, /etc/bt_server/*, and the units
                                 # bt-executor, bt-gateway, bt-server-name (+ bt-server.target), enabled and started
 ```
@@ -54,8 +55,14 @@ Both kinds of install, here and on a Jetson, behave the same way:
 * **The run scripts and the setups refuse to start an executor** whose name is on the ROS network
   of the domain already (another machine, or a service of this one), as two would both accept the
   same goals. They look with `ros2 node list` for about 5 s first. The run scripts also refuse
-  while a service of this machine runs that name in that domain, and when the settings' address
-  is no longer this machine's (a new DHCP lease).
+  while a service of this machine runs that name in that domain, when something listens on the
+  gateway's port already, and when the settings' address is no longer this machine's (a new DHCP
+  lease).
+* **The run scripts** (`run.sh`, `jetson_run.sh`) publish `bt.<hostname>.local` and
+  `bt-<hostname>.local` while they run (`--no-names`: not; the services have
+  `bt-server-name.service`), and with a `--namespace` other than the settings' the gateway lists
+  that run's executor, so that a page attaches to it (a copy of `gateway.toml`, removed
+  afterwards). Ctrl+C stops a running tree as Stop does and waits for its cancels.
 * **Settings that are kept** (no `--reconfigure`) and differ from what was asked for, or name an
   address that is no longer this machine's, get a warning, and so does an address that came from
   DHCP: give the machine a DHCP reservation.
@@ -76,6 +83,7 @@ Ubuntu 26.04 container ([docs/JETSON.md](docs/JETSON.md)):
 ```bash
 ./jetson_install.sh                    # Docker and Avahi's tools if missing, the image bt-server:latest, config/
 ./jetson_run.sh                        # executor /<hostname>/bt_executor and the gateway on http://<LAN address>:8080/
+                                       # and http://bt-<hostname>.local:8080/ while it runs
 ./jetson_setup_system_service.sh       # user btserver, /etc/bt_server/*, and the units bt-server-container,
                                        # bt-server-name (+ bt-server.target), enabled and started
 ```

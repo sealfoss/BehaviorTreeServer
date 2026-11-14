@@ -12,9 +12,14 @@
 #   --no-names       do not publish bt.<hostname>.local and bt-<hostname>.local
 #
 # The container has no Avahi, so while it runs this script publishes the two names from the host,
-# for the gateway's address. It refuses to start when an executor of the same name is on the ROS
-# network of the domain already: two would both accept the same goals. When Docker needs sudo (a
-# user not in the group docker), the script runs itself under sudo; the container still runs as you.
+# for the gateway's address. With another namespace than the settings name, the gateway lists this
+# run's executor (a copy of gateway.toml in .data/, removed afterwards). It refuses to start, with a
+# message saying what to do, when an executor of the same name is on the ROS network of the domain
+# already (another machine, or the service: two would both accept the same goals; it looks for
+# about 5 s first), when the service runs that name in that domain, when it runs already, or when
+# the gateway's address is no longer this machine's, its port is below 1024 or something listens
+# on that port already. When Docker needs sudo (a user not in the group docker), the script runs
+# itself under sudo; the container still runs as you.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,7 +40,7 @@ while [ $# -gt 0 ]; do
         --namespace) need_value "$1" $#; NAMESPACE="$2"; shift 2 ;;
         --image) need_value "$1" $#; IMAGE="$2"; shift 2 ;;
         --no-names) NAMES=0; shift ;;
-        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) unknown_option "$1" ;;
     esac
 done
@@ -64,7 +69,7 @@ if [ "$(id -u)" != 0 ] && command -v docker >/dev/null && ! docker info >/dev/nu
     exec "${sudo_command[@]}" -- env "${keep[@]}" "$REPO/jetson_run.sh" "${args[@]}"
 fi
 
-# --------------------------------------------------------------------------- the settings
+# --------------------------------------------------------------------------- the checks
 # The container runs as the user who started this script (also under sudo), who owns .data/.
 USER_ID="$(id -u):$(id -g)"
 if [ "$(id -u)" = 0 ] && [ -n "${SUDO_UID:-}" ]; then USER_ID="$SUDO_UID:${SUDO_GID:-$SUDO_UID}"; fi
@@ -76,7 +81,6 @@ fi
 HOST_ADDRESS="$(gateway_value "$CONFIG_DIR/gateway.toml" http_host)"
 HOST_PORT="$(gateway_value "$CONFIG_DIR/gateway.toml" http_port)"
 HOST_PORT="${HOST_PORT:-80}"
-HOST_SHORT="$(short_hostname)"
 # The container sees only .data/ (at the same path) and the settings: folders elsewhere would be
 # inside the container, and lost with it.
 for setting in "$(gateway_value "$CONFIG_DIR/gateway.toml" trees_dir)" \
@@ -86,27 +90,9 @@ for setting in "$(gateway_value "$CONFIG_DIR/gateway.toml" trees_dir)" \
         die "the settings in $CONFIG_DIR name $setting, which is outside $DATA_DIR (moved checkout?): run ./jetson_install.sh --reconfigure"
     fi
 done
+check_run_settings "$CONFIG_DIR" jetson_install.sh
 if [ "$HOST_PORT" -lt "$(unprivileged_port_start)" ]; then
     die "port $HOST_PORT (http_port in $CONFIG_DIR/gateway.toml) needs privileges this container does not get: use a port from $(unprivileged_port_start) (./jetson_install.sh --port 8080 --reconfigure), or the service, ./jetson_setup_system_service.sh"
-fi
-# The gateway lists this run's executor first (a page that has not chosen one attaches to it): with
-# another namespace than the settings name, it reads a copy of gateway.toml that names this one.
-GATEWAY_OPTIONS=()
-RUN_GATEWAY="$DATA_DIR/.gateway-run.toml"
-rm -f "$RUN_GATEWAY"
-if ! grep -Fq "\"/$NAMESPACE/bt_executor\"" "$CONFIG_DIR/gateway.toml"; then
-    sed "s|^executors *=.*|executors = [\"/$NAMESPACE/bt_executor\"]|" "$CONFIG_DIR/gateway.toml" > "$RUN_GATEWAY"
-    if ! grep -q '^executors *=' "$RUN_GATEWAY"; then
-        printf 'executors = ["/%s/bt_executor"]\n' "$NAMESPACE" >> "$RUN_GATEWAY"
-    fi
-    chmod 644 "$RUN_GATEWAY"
-    GATEWAY_OPTIONS=(-v "$RUN_GATEWAY:/opt/bt_server/config/gateway.toml:ro")
-    note "$PROG: for this run the gateway's executors are [/$NAMESPACE/bt_executor] ($CONFIG_DIR/gateway.toml names others)"
-fi
-check_run_settings "$CONFIG_DIR" jetson_install.sh
-NAME_ADDRESS="$HOST_ADDRESS"
-if listens_everywhere "$HOST_ADDRESS"; then
-    NAME_ADDRESS="$(lan_address)"
 fi
 
 setup_sudo
@@ -120,14 +106,13 @@ if container_running "$RUN_CONTAINER"; then
     die "jetson_run.sh is running already (container $RUN_CONTAINER)"
 fi
 "${DOCKER[@]}" rm --force "$RUN_CONTAINER" >/dev/null 2>&1 || true   # one left over, stopped
-
+refuse_port_in_use "$HOST_ADDRESS" "$HOST_PORT"
 require_name_free "$NAMESPACE" "$DOMAIN" ros_nodes_container "$DOMAIN" "$IMAGE" "$USER_ID"
 
 # --------------------------------------------------------------------------- cleaning up
 # On every way out: stop the container if it still runs (once docker run has ended, it would run
-# on unseen), and withdraw the names.
+# on unseen), withdraw the names and remove the gateway's copy of the settings.
 docker_pid=""
-names_pid=""
 stop_sent=0
 # Whether the container runs, asked in a session of its own, so that a Ctrl+C or a hangup cannot
 # make the answer "no" (here Docker never goes through sudo: the script runs as root or as a
@@ -151,39 +136,27 @@ stop_container() {
         note "$PROG: docker stop $RUN_CONTAINER did not succeed; see: sudo docker ps"
     fi
 }
+RUN_GATEWAY="$DATA_DIR/.gateway-run.toml"
 cleanup() {
     if [ -n "$docker_pid" ] && [ "$stop_sent" = 0 ] && container_up; then
         stop_container
     fi
     rm -f "$RUN_GATEWAY"
-    if [ -n "$names_pid" ]; then
-        # the publisher and its avahi-publish processes: a process group of their own (setsid)
-        kill -TERM -- "-$names_pid" 2>/dev/null || kill -TERM "$names_pid" 2>/dev/null || true
-        wait "$names_pid" 2>/dev/null || true
-        names_pid=""
-    fi
+    stop_run_names
 }
 trap cleanup EXIT
 
-# --------------------------------------------------------------------------- the names
+# --------------------------------------------------------------------------- the settings, the names
+# (The copy is mounted at the place of gateway.toml, in the same folder as the gateway sees it.)
+GATEWAY_OPTIONS=()
+rm -f "$RUN_GATEWAY"   # (one left over)
+if ! gateway_lists "$CONFIG_DIR/gateway.toml" "$NAMESPACE"; then
+    write_run_gateway "$CONFIG_DIR/gateway.toml" "$NAMESPACE" "$RUN_GATEWAY"
+    GATEWAY_OPTIONS=(-v "$RUN_GATEWAY:/opt/bt_server/config/gateway.toml:ro")
+fi
+PAGE_ADDRESS="$(page_address "$HOST_ADDRESS")"
 if [ "$NAMES" = 1 ]; then
-    if [ -z "$NAME_ADDRESS" ] || [[ "$NAME_ADDRESS" == 127.* ]]; then
-        warn "the gateway listens on '${HOST_ADDRESS:-?}', not on a LAN address: the names are not published"
-    elif ! command -v avahi-publish >/dev/null || ! systemctl is-active --quiet avahi-daemon 2>/dev/null; then
-        warn "Avahi is not running or avahi-utils is missing (run ./jetson_install.sh): the names are not published"
-    else
-        # In a session of its own, so that the terminal's signals (Ctrl+C, hangup) do not reach it:
-        # cleanup withdraws the names, whichever way this script ends.
-        BT_ADDRESS="$NAME_ADDRESS" setsid "$REPO/bt_server_bringup/systemd/bt-publish-name" \
-            "bt.$HOST_SHORT.local" "bt-$HOST_SHORT.local" </dev/null >/dev/null 2>&1 &
-        names_pid=$!
-        sleep 1
-        if ! kill -0 "$names_pid" 2>/dev/null; then
-            wait "$names_pid" 2>/dev/null || true
-            names_pid=""
-            warn "bt.$HOST_SHORT.local and bt-$HOST_SHORT.local could not be published (published by something else already?)"
-        fi
-    fi
+    start_run_names "$PAGE_ADDRESS" "$HOST_ADDRESS" "$REPO/bt_server_bringup/systemd/bt-publish-name" jetson_install.sh
 fi
 
 # --------------------------------------------------------------------------- the container
@@ -197,12 +170,7 @@ stop_requested=0
 trap 'stop_requested=1' INT TERM HUP
 trap '' PIPE
 
-suffix=""
-[ "$HOST_PORT" = 80 ] || suffix=":$HOST_PORT"
-note "$PROG: executor /$NAMESPACE/bt_executor (ROS domain $DOMAIN) and gateway on http://${NAME_ADDRESS:-$HOST_ADDRESS}$suffix/ ; Ctrl+C stops both"
-if [ -n "$names_pid" ]; then
-    note "$PROG: also http://bt-${HOST_SHORT,,}.local$suffix/ (Windows, Linux) and http://bt.${HOST_SHORT,,}.local$suffix/ (macOS, iOS)"
-fi
+run_banner "$NAMESPACE" "$DOMAIN" "${PAGE_ADDRESS:-$HOST_ADDRESS}" "$HOST_PORT" "Ctrl+C stops both"
 
 "${DOCKER[@]}" run --rm --name "$RUN_CONTAINER" "${CONTAINER_RUN_OPTIONS[@]}" --sig-proxy=false \
     --cap-drop ALL --user "$USER_ID" --stop-timeout 30 \

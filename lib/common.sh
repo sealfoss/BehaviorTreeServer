@@ -207,6 +207,92 @@ check_run_settings() {   # config dir, the install script that fixes them
     fi
 }
 
+# ------------------------------------------------------------------------------ the run scripts
+# What run.sh and jetson_run.sh do the same way around the executor and the gateway they start.
+
+# Refuse a port that something on this machine listens on already (another run, or a service), on
+# the gateway's address or on all addresses: the gateway could not start.
+refuse_port_in_use() {   # address, port
+    local entry host
+    while read -r entry; do
+        [ "${entry##*:}" = "$2" ] || continue
+        host="${entry%:*}"
+        if listens_everywhere "$1" || [ "$host" = "$1" ] || [ "$host" = "*" ] || [ "$host" = 0.0.0.0 ] || [ "$host" = "[::]" ]; then
+            die "something on this machine listens on port $2 already ($entry: another run, or a service?): stop it first, or use another port (http_port in gateway.toml)"
+        fi
+    done < <(ss -Hltn 2>/dev/null | awk '{print $4}')
+}
+
+# The address a page reaches the gateway at: its http_host, or the LAN address when it listens on all.
+page_address() {   # http_host
+    if listens_everywhere "$1"; then lan_address; else echo "$1"; fi
+}
+
+# The gateway lists the run's executor first (a page that has not chosen one attaches to it). For a
+# run with another namespace than gateway.toml names (gateway_lists fails), the run scripts give the
+# gateway a copy of it that names this run's executor alone. The copy must be in the same folder as
+# the gateway sees it, as relative folders in it are relative to the file.
+write_run_gateway() {   # settings file, namespace, the copy
+    local line="executors = [\"/$2/bt_executor\"]"
+    if grep -q '^executors *=' "$1"; then
+        # (a list over several lines ends at the line with "]")
+        awk -v line="$line" '
+            skip { if (index($0, "]")) skip = 0; next }
+            /^executors *=/ { print line; if (!index($0, "]")) skip = 1; next }
+            { print }' "$1" > "$3"
+    else
+        { echo "$line"; cat "$1"; } > "$3"
+    fi
+    chmod 644 "$3"
+    note "$PROG: for this run the gateway's executors are [/$2/bt_executor], not those of $1"
+}
+
+# The names bt.<hostname>.local and bt-<hostname>.local while a run script runs (for the services
+# bt-server-name.service publishes them). start_run_names sets NAMES_PID; stop_run_names withdraws
+# them, whichever way the script ends (call it from its EXIT trap).
+NAMES_PID=""
+start_run_names() {   # address, http_host (for the message), the publisher (bt-publish-name), the install script
+    local address="$1" host
+    host="$(short_hostname)"
+    if [ -z "$address" ] || [[ "$address" == 127.* ]]; then
+        warn "the gateway listens on '${2:-?}', not on a LAN address: the names are not published"
+        return 0
+    fi
+    if [ ! -x "$3" ] || ! command -v avahi-publish >/dev/null || ! systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+        warn "Avahi is not running, or avahi-utils or $3 is missing (run ./$4): the names are not published"
+        return 0
+    fi
+    # In a session of its own, so that the terminal's signals (Ctrl+C, hangup) do not reach it:
+    # stop_run_names withdraws the names.
+    BT_ADDRESS="$address" setsid "$3" "bt.$host.local" "bt-$host.local" </dev/null >/dev/null 2>&1 &
+    NAMES_PID=$!
+    sleep 1
+    if ! kill -0 "$NAMES_PID" 2>/dev/null; then
+        wait "$NAMES_PID" 2>/dev/null || true
+        NAMES_PID=""
+        warn "bt.$host.local and bt-$host.local could not be published (published by another machine already?)"
+    fi
+}
+stop_run_names() {
+    [ -n "$NAMES_PID" ] || return 0
+    # the publisher and its avahi-publish processes: a process group of their own (setsid)
+    kill -TERM -- "-$NAMES_PID" 2>/dev/null || kill -TERM "$NAMES_PID" 2>/dev/null || true
+    wait "$NAMES_PID" 2>/dev/null || true
+    NAMES_PID=""
+}
+
+# The line that says what runs where (and the names, when they are published).
+run_banner() {   # namespace, domain, page address, port, what stops it (empty: nothing said)
+    local suffix="" host
+    [ "$4" = 80 ] || suffix=":$4"
+    note "$PROG: executor /$1/bt_executor (ROS domain $2) and gateway on http://$3$suffix/${5:+ ; $5}"
+    if [ -n "$NAMES_PID" ]; then
+        host="$(short_hostname)"
+        host="${host,,}"
+        note "$PROG: also http://bt-$host.local$suffix/ (Windows, Linux) and http://bt.$host.local$suffix/ (macOS, iOS)"
+    fi
+}
+
 # ------------------------------------------------------------------------------ the services' units
 # Whether UNIT is up or coming up (also while Restart= waits to start it again).
 unit_up() {

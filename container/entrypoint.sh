@@ -27,5 +27,6 @@ if [ -d /opt/bt_server/config/leaves ]; then
 fi
 # --no-checks: jetson_run.sh and jetson_setup_system_service.sh look for the executor's name on
 # the ROS network, and for the service, before they start the container; from inside it run.sh
-# could not see this machine's services and address.
-exec /opt/bt_server/run.sh --prefix /opt/bt_server --no-checks "$@"
+# could not see this machine's services and address. --no-names: the container has no Avahi;
+# jetson_run.sh and bt-server-name.service publish the names from the host.
+exec /opt/bt_server/run.sh --prefix /opt/bt_server --no-checks --no-names "$@"

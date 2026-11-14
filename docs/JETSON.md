@@ -88,11 +88,14 @@ and that is the image. It holds ROS 2's base packages (`std_msgs`, `geometry_msg
     the service below): two executors of one name would both accept the same goals. It looks with
     `ros2 node list` for about 5 s first;
   * the service runs the same executor name in the same domain;
+  * it runs already, or something else on this machine listens on the gateway's port;
   * `config/gateway.toml`'s address is no longer this machine's (a new DHCP lease), its port is
     below 1024, or a folder in the settings is outside `.data/` (a moved checkout):
     `./jetson_install.sh --reconfigure` fixes these.
 * With `--namespace NS` other than the settings', the gateway lists `/NS/bt_executor` for that
   run (a copy of `gateway.toml` in `.data/`, removed afterwards), so that a page attaches to it.
+  `run.sh` does the same (its copy is beside `config/gateway.toml`).
+* `--no-names` leaves the names out, as `run.sh --no-names` does.
 * Without membership of the group `docker`, the script runs itself under `sudo` (one password
   prompt). The container still runs as you, with no capabilities.
 * ROS discovery and middleware settings in your environment (`ROS_AUTOMATIC_DISCOVERY_RANGE`,
@@ -166,7 +169,9 @@ sudo systemctl stop bt-server.target      # returns at once; the container stops
 
 The container has no Avahi, so the names are published from the host: by `jetson_run.sh` while it
 runs, and by `bt-server-name.service` (`bt-publish-name`, that is `avahi-publish -a -R`, design
-14.3).
+14.3), as `run.sh` and the same unit do on Ubuntu 26.04. (Its entry point runs `run.sh` with
+`--no-names`.) A run while the service runs publishes the same records beside the service's (Avahi
+accepts the same name and address twice); when the run ends, the service's stay.
 
 * `bt-<hostname>.local` is for Windows, which does not look up three-part `.local` names;
   `bt.<hostname>.local` for macOS and iOS. Linux with Avahi's usual `mdns4_minimal` does not look
