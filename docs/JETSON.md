@@ -12,10 +12,13 @@ three do without one:
 | Run in a terminal | `./run.sh` | `./jetson_run.sh` |
 | Run as services that start at boot | `./setup_system_service.sh` | `./jetson_setup_system_service.sh` |
 
-The container's files are in `container/`: `Dockerfile`, the entry point `entrypoint.sh`, the
-scripts' shared `common.sh`, and the unit templates `*.in`. `.dockerignore` keeps this machine's
-`config/`, `.data/`, builds and caches out of the image. Every script prints its options with
-`--help`.
+The container's files are in `container/`: `Dockerfile`, the entry point `entrypoint.sh`, and the
+unit templates `*.in` (`bt-server-name.service.in`, the same for both kinds, is in
+`bt_server_bringup/systemd/`). All six scripts share `lib/common.sh` (with `lib/base.sh`, the part that `install.sh` needs
+before it has built anything): the settings they write,
+their checks and the steps of a setup, so the two kinds behave the same way (README.md).
+`.dockerignore` keeps this machine's `config/`, `.data/`, builds and caches out of the image. Every
+script prints its options with `--help`.
 
 ## Install
 
@@ -33,8 +36,9 @@ scripts' shared `common.sh`, and the unit templates `*.in`. `.dockerignore` keep
   `install/`, `bin/`), laid out as for the systemd services. It takes about 2 GB of disk, and
   Docker's build cache about as much again.
 * **The first build** takes about 13 minutes on an Orin, most of it downloading Ubuntu's and ROS's
-  packages. The dependencies are a layer of their own that only a change to `install.sh` or a
-  `package.xml` rebuilds: after a change to the code, a rebuild takes about a minute.
+  packages. The dependencies are a layer of their own that only a change to `install.sh`,
+  `lib/base.sh` or a `package.xml` rebuilds: after a change to the code (or to the scripts'
+  `lib/common.sh`), a rebuild takes about a minute.
 * **The test suite** (`--test`) runs on Docker's own network, in ROS domain 71 with discovery kept
   to the container, so it neither sees nor disturbs the ROS programs on the LAN. About 7 minutes.
 * **After changing the code**, run `./jetson_install.sh` again, then
@@ -123,9 +127,13 @@ sudo systemctl stop bt-server.target      # returns at once; the container stops
 * Options: `--namespace NS`, `--address IP`, `--port N` (80), `--domain N`, `--image NAME`,
   `--reconfigure`, `--skip-build`, `--no-start`. Run again without `--namespace` or `--domain`,
   the service keeps the ones it has.
-* Before starting, it stops the service and looks for the executor's name on the ROS network, as
-  `jetson_run.sh` does. With `--no-start` a running service is left alone (and a warning says when
-  the new settings differ from what it runs).
+* Before it writes the settings and the units, it looks for the executor's name on the ROS network,
+  as `jetson_run.sh` does, and refuses a name in use. It stops the service first only when the
+  service runs this very name in this domain (it would be the executor found); a service with
+  another name keeps running, so a refused setup leaves the settings, the units and the running
+  service as they were (the image may be new: the service uses it from its next restart). With
+  `--no-start` nothing is looked for, and a warning says when the new settings differ from what the
+  running service has.
 * It refuses to run while `./jetson_run.sh` runs, and on a machine with the services of
   `setup_system_service.sh`.
 * At the end it checks the units, the container, the page, the executor on the ROS network, and
@@ -170,10 +178,10 @@ runs, and by `bt-server-name.service` (`bt-publish-name`, that is `avahi-publish
 
 ## ROS on the LAN
 
-* **The executor's namespace is the host name by default** (`/orion/bt_executor`), not `cell1`:
-  every executor in a domain needs a name of its own, and MOTHER-BRAIN's server already has
-  `/cell1/bt_executor` in domain 0 on the same network. Both scripts look for the name first and
-  refuse a name in use.
+* **The executor's namespace is the host name by default** (`/orion/bt_executor`), as on Ubuntu
+  26.04: every executor in a domain needs a name of its own, and MOTHER-BRAIN's server has
+  `/cell1/bt_executor` (the namespace it was installed with, which it keeps) in domain 0 on the
+  same network. Every run script and setup looks for the name first and refuses a name in use.
 * **Every gateway lists every executor in its domain.** The Jetson's page shows MOTHER-BRAIN's
   `/cell1/bt_executor` too, and the other way round; trees run on the executor you attach to. A
   browser that has not chosen one attaches to the first in the list, which is always the gateway's

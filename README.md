@@ -25,6 +25,7 @@ work on other machines through ROS 2 (Lyrical).
 | `tests/page/` | Browser tests of the page (Playwright) against a real gateway. |
 | `tools/` | `smoke_test.py` (drives a running server like a browser), `make_example_trees.py`. |
 | `container/` | The Ubuntu 26.04 image for hosts that cannot run Lyrical, such as a Jetson: `Dockerfile`, entry point, unit templates (docs/JETSON.md). |
+| `lib/` | `common.sh` and `base.sh`, shared by the six install, run and setup scripts: the settings they write, their checks and the steps of a setup. |
 
 ## Install, run, and run as a service
 
@@ -34,7 +35,7 @@ On Ubuntu 26.04:
 ./install.sh                    # system packages that are missing (ROS 2 Lyrical, aiohttp, avahi-utils, ...),
                                 # the Python environment .venv (--system-site-packages), the colcon build,
                                 # and settings for this machine in config/
-./run.sh                        # executor /cell1/bt_executor and the gateway on http://<LAN address>:8080/
+./run.sh                        # executor /<hostname>/bt_executor and the gateway on http://<LAN address>:8080/
 ./setup_system_service.sh       # build into /opt/bt_server, user btserver, /etc/bt_server/*, and the units
                                 # bt-executor, bt-gateway, bt-server-name (+ bt-server.target), enabled and started
 ```
@@ -42,6 +43,25 @@ On Ubuntu 26.04:
 With the services running the page is at `http://bt-<hostname>.local/` (Windows, Linux),
 `http://bt.<hostname>.local/` (macOS, iOS), or `http://<LAN address>/`. Windows does not look up
 three-part `.local` names, so both names are published (see docs/VERIFIED.md).
+
+Both kinds of install, here and on a Jetson, behave the same way:
+
+* **The executor's namespace** is the host name made a ROS name (`/orion/bt_executor`,
+  `/lab_2/bt_executor` for `lab-2`), so that servers in one ROS domain never share an executor
+  name. An installation keeps the namespace it has (`config/namespace`, or the service's), and a
+  setup run again keeps the service's namespace and ROS domain unless `--namespace` or `--domain`
+  says otherwise.
+* **The run scripts and the setups refuse to start an executor** whose name is on the ROS network
+  of the domain already (another machine, or a service of this one), as two would both accept the
+  same goals. They look with `ros2 node list` for about 5 s first. The run scripts also refuse
+  while a service of this machine runs that name in that domain, and when the settings' address
+  is no longer this machine's (a new DHCP lease).
+* **Settings that are kept** (no `--reconfigure`) and differ from what was asked for, or name an
+  address that is no longer this machine's, get a warning, and so does an address that came from
+  DHCP: give the machine a DHCP reservation.
+* **A setup checks at the end** the units, the page, the executor on the ROS network, and that both
+  names resolve to this gateway and are accepted by it. One machine has one kind of service:
+  each setup refuses to run where the other's units are installed.
 
 ```bash
 systemctl status bt-server.target              # all three units

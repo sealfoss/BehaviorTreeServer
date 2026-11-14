@@ -8,9 +8,10 @@
 #
 # The project's own install.sh makes the image, so it holds what docs/INSTALLED.md lists, laid
 # out as for the systemd services (install.sh --service): /opt/bt_server/venv, /opt/bt_server/install
-# and /opt/bt_server/bin. The dependencies come first, in a layer of their own that only a change
-# to install.sh or a package.xml invalidates: a change to the code rebuilds in about a minute
-# instead of downloading ROS again.
+# and /opt/bt_server/bin, with run.sh and the scripts' lib/ next to them. The dependencies come
+# first, in a layer of their own that only a change to install.sh, lib/base.sh or a package.xml
+# invalidates: a change to the code, or to the rest of the scripts' lib/common.sh, rebuilds in about
+# a minute instead of downloading ROS again.
 
 ARG BASE_IMAGE=ubuntu:26.04
 
@@ -18,6 +19,7 @@ ARG BASE_IMAGE=ubuntu:26.04
 FROM ${BASE_IMAGE} AS deps
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 PYTHONUNBUFFERED=1
 COPY install.sh /src/install.sh
+COPY lib/base.sh /src/lib/base.sh
 COPY bt_server_interfaces/package.xml /src/bt_server_interfaces/package.xml
 COPY bt_server_core/package.xml /src/bt_server_core/package.xml
 COPY bt_server_executor/package.xml /src/bt_server_executor/package.xml
@@ -39,7 +41,8 @@ RUN if [ -n "$EXTRA_APT_PACKAGES" ]; then \
     fi
 COPY . /src
 RUN /src/install.sh --prefix /opt/bt_server --service --skip-apt \
- && install -m 0755 /src/run.sh /opt/bt_server/bin/run.sh \
+ && install -m 0755 /src/run.sh /opt/bt_server/run.sh \
+ && install -D -m 0644 -t /opt/bt_server/lib /src/lib/base.sh /src/lib/common.sh \
  && install -m 0755 /src/container/entrypoint.sh /opt/bt_server/bin/entrypoint \
  && rm -rf /opt/bt_server/build /opt/bt_server/log
 LABEL org.bt-server.image="server"

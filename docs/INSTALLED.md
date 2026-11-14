@@ -40,7 +40,7 @@ Nothing is installed into the system Python with pip.
 | `~/projects/BehaviorTreeServer/.venv`, `build/`, `install/`, `config/`, `.data/` | `install.sh` | The development environment, its build, settings for this machine (gateway on 192.168.68.77:8080) and its trees, logs and goal journal. |
 | `/opt/bt_server/` (`venv/`, `build/`, `install/`, `bin/bt-publish-name`) | `setup_system_service.sh` | The build the services run, owned by the user who ran the script. |
 | System user `btserver`, home `/var/lib/bt_server` | `setup_system_service.sh` | Runs both services; holds the trees (`/var/lib/bt_server/trees`), the goal journal and the gateway's state. |
-| `/etc/bt_server/gateway.toml`, `/etc/bt_server/executor.yaml` | `setup_system_service.sh` | The services' settings (gateway on 192.168.68.77:80, executor `/cell1/bt_executor`, ROS domain 0). |
+| `/etc/bt_server/gateway.toml`, `executor.yaml`, `namespace` | `setup_system_service.sh` | The services' settings (gateway on 192.168.68.77:80, executor `/cell1/bt_executor`, ROS domain 0). |
 | `/etc/systemd/system/bt-executor.service`, `bt-gateway.service`, `bt-server-name.service`, `bt-server.target` | `setup_system_service.sh` | The units, enabled for boot. Tree logs go to `/var/log/bt_server`. |
 | rosdep's sources list (`/etc/ros/rosdep/sources.list.d/20-default.list`) | `install.sh` | `rosdep init`, so the package.xml dependencies can be resolved. |
 | Chrome Headless Shell in `~/.cache/ms-playwright` | `install.sh` | Browser for the page tests. |

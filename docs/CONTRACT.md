@@ -65,7 +65,10 @@ BehaviorTreeServer/
 ├── bt_server_gateway/         [gateway] aiohttp; bt_server_gateway/static/ holds the built page
 ├── bt_server_bringup/         [orchestrator] launch, config, systemd units
 ├── web/                       [web] Svelte 5 + TypeScript + Vite; builds into bt_server_gateway/bt_server_gateway/static
-└── install.sh, run.sh, setup_system_service.sh   [orchestrator]
+├── container/                 [orchestrator] the Ubuntu 26.04 image for a Jetson (docs/JETSON.md)
+├── lib/                       [orchestrator] common.sh, base.sh: shared by the six scripts below
+├── install.sh, run.sh, setup_system_service.sh   [orchestrator]
+└── jetson_install.sh, jetson_run.sh, jetson_setup_system_service.sh   [orchestrator] the same, in a container
 ```
 
 Tests live in `<package>/test/test_*.py`. Name each Appendix B case in the test name

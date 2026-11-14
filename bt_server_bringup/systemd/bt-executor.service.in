@@ -11,6 +11,7 @@ User=@USER@
 StateDirectory=bt_server
 LogsDirectory=bt_server
 Environment=ROS_DOMAIN_ID=@DOMAIN@
+Environment=BT_NAMESPACE=@NAMESPACE@
 Environment=HOME=/var/lib/bt_server
 ExecStart=/bin/bash -c 'source @ROS_SETUP@ && source @PREFIX@/install/setup.bash && source @PREFIX@/venv/bin/activate && exec python -m bt_server_executor --ros-args -r __ns:=/@NAMESPACE@ -r __node:=bt_executor --params-file @CONF@/executor.yaml'
 KillSignal=SIGINT

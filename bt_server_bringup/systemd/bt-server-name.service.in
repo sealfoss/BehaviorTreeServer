@@ -1,6 +1,7 @@
 # Publishes bt.<hostname>.local and bt-<hostname>.local for the gateway's address (design
 # 14.3; the second name because Windows 11 does not look up three-part .local names, see
-# docs/VERIFIED.md). Written by setup_system_service.sh from
+# docs/VERIFIED.md), from the host: by setup_system_service.sh's services and, as the container
+# has no Avahi, by jetson_setup_system_service.sh's. Written by either script from
 # bt_server_bringup/systemd/bt-server-name.service.in.
 # BT_ADDRESS is the server's LAN address, or "auto" to use the address of the default route
 # when the unit starts.

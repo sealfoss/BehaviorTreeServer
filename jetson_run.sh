@@ -19,8 +19,8 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROG="jetson_run.sh"
-# shellcheck source=container/common.sh
-source "$REPO/container/common.sh"
+# shellcheck source=lib/common.sh
+source "$REPO/lib/common.sh"
 
 DOMAIN="${ROS_DOMAIN_ID:-0}"
 NAMESPACE=""
@@ -36,17 +36,18 @@ while [ $# -gt 0 ]; do
         --image) need_value "$1" $#; IMAGE="$2"; shift 2 ;;
         --no-names) NAMES=0; shift ;;
         -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "$PROG: unknown option $1" >&2; exit 2 ;;
+        *) unknown_option "$1" ;;
     esac
 done
 
 [ -r "$CONFIG_DIR/gateway.toml" ] || die "$CONFIG_DIR/gateway.toml missing: run ./jetson_install.sh"
 [ -r "$CONFIG_DIR/executor.yaml" ] || die "$CONFIG_DIR/executor.yaml missing: run ./jetson_install.sh"
 if [ -z "$NAMESPACE" ]; then
-    NAMESPACE="$(cat "$CONFIG_DIR/namespace" 2>/dev/null || default_namespace)"
+    NAMESPACE="$(head -1 "$CONFIG_DIR/namespace" 2>/dev/null || true)"
+    [ -n "$NAMESPACE" ] || NAMESPACE="$(default_namespace)"
 fi
-valid_namespace "$NAMESPACE" || die "the namespace must be a ROS name part (letters, digits, single _), not '$NAMESPACE'"
-valid_domain "$DOMAIN" || die "--domain must be a number from 0 to 232, not '$DOMAIN'"
+check_namespace "$NAMESPACE"
+check_domain "$DOMAIN"
 
 # A user who may use Docker only through sudo: run this whole script under sudo, once. (A docker run
 # started under sudo in the background would take over the terminal, as sudo does with use_pty, the
@@ -72,15 +73,15 @@ if [ "$(id -u)" = 0 ]; then
     chown "$USER_ID" "$DATA_DIR" "$DATA_DIR/trees" "$DATA_DIR/log"
 fi
 
-HOST_ADDRESS="$(sed -n 's/^http_host *= *"\([^"]*\)".*/\1/p' "$CONFIG_DIR/gateway.toml")"
-HOST_PORT="$(sed -n 's/^http_port *= *\([0-9]*\).*/\1/p' "$CONFIG_DIR/gateway.toml")"
+HOST_ADDRESS="$(gateway_value "$CONFIG_DIR/gateway.toml" http_host)"
+HOST_PORT="$(gateway_value "$CONFIG_DIR/gateway.toml" http_port)"
 HOST_PORT="${HOST_PORT:-80}"
 HOST_SHORT="$(short_hostname)"
 # The container sees only .data/ (at the same path) and the settings: folders elsewhere would be
 # inside the container, and lost with it.
-for setting in "$(sed -n 's/^trees_dir *= *"\([^"]*\)".*/\1/p' "$CONFIG_DIR/gateway.toml")" \
-               "$(sed -n 's/^ *log_dir: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' "$CONFIG_DIR/executor.yaml")" \
-               "$(sed -n 's/^ *journal_file: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' "$CONFIG_DIR/executor.yaml")"; do
+for setting in "$(gateway_value "$CONFIG_DIR/gateway.toml" trees_dir)" \
+               "$(executor_value "$CONFIG_DIR/executor.yaml" log_dir)" \
+               "$(executor_value "$CONFIG_DIR/executor.yaml" journal_file)"; do
     if [ -n "$setting" ] && [[ "$setting" != "$DATA_DIR"/* ]]; then
         die "the settings in $CONFIG_DIR name $setting, which is outside $DATA_DIR (moved checkout?): run ./jetson_install.sh --reconfigure"
     fi
@@ -102,14 +103,10 @@ if ! grep -Fq "\"/$NAMESPACE/bt_executor\"" "$CONFIG_DIR/gateway.toml"; then
     GATEWAY_OPTIONS=(-v "$RUN_GATEWAY:/opt/bt_server/config/gateway.toml:ro")
     note "$PROG: for this run the gateway's executors are [/$NAMESPACE/bt_executor] ($CONFIG_DIR/gateway.toml names others)"
 fi
+check_run_settings "$CONFIG_DIR" jetson_install.sh
 NAME_ADDRESS="$HOST_ADDRESS"
 if listens_everywhere "$HOST_ADDRESS"; then
     NAME_ADDRESS="$(lan_address)"
-elif [[ "$HOST_ADDRESS" != 127.* ]]; then
-    addresses="$(ip -4 -o addr show 2>/dev/null || true)"
-    if [[ "$addresses" != *" inet $HOST_ADDRESS/"* ]]; then
-        die "the gateway's address $HOST_ADDRESS (http_host in $CONFIG_DIR/gateway.toml) is not this machine's any more (a new DHCP lease?): run ./jetson_install.sh --reconfigure"
-    fi
 fi
 
 setup_sudo
@@ -117,31 +114,14 @@ setup_docker
 ros_env_options
 image_exists "$IMAGE" || die "no image $IMAGE: run ./jetson_install.sh"
 
-# The service of jetson_setup_system_service.sh, when it runs (or is restarting) an executor of
-# this name in this domain: its unit says which.
-if service_up; then
-    service_env="$(systemctl show --property=Environment --value "$SERVICE_UNIT" 2>/dev/null || true)"
-    service_domain="$(tr ' ' '\n' <<<"$service_env" | sed -n 's/^ROS_DOMAIN_ID=//p')"
-    service_namespace="$(tr ' ' '\n' <<<"$service_env" | sed -n 's/^BT_NAMESPACE=//p')"
-    if [ "${service_domain:-0}" = "$DOMAIN" ] && [ "${service_namespace:-$NAMESPACE}" = "$NAMESPACE" ]; then
-        if [ "$(systemctl is-active "$SERVICE_UNIT" 2>/dev/null || true)" = deactivating ]; then
-            die "the service $SERVICE_UNIT is still stopping (up to 30 s); try again in a moment"
-        fi
-        die "the service $SERVICE_UNIT runs /$NAMESPACE/bt_executor in ROS domain $DOMAIN; stop it (sudo systemctl stop bt-server.target), or use --namespace NS or --domain N"
-    fi
-fi
+# A service of this machine that runs (or is restarting) an executor of this name in this domain.
+refuse_running_service "$NAMESPACE" "$DOMAIN"
 if container_running "$RUN_CONTAINER"; then
     die "jetson_run.sh is running already (container $RUN_CONTAINER)"
 fi
 "${DOCKER[@]}" rm --force "$RUN_CONTAINER" >/dev/null 2>&1 || true   # one left over, stopped
 
-echo "$PROG: looking for /$NAMESPACE/bt_executor on the ROS network (domain $DOMAIN)"
-status=0
-node_on_network "$IMAGE" "$DOMAIN" "/$NAMESPACE/bt_executor" "$USER_ID" || status=$?
-case "$status" in
-    0) die "an executor /$NAMESPACE/bt_executor is on the ROS network of domain $DOMAIN already (another machine, or the service); use --namespace NS or --domain N" ;;
-    2) warn "could not look for other executors; starting anyway" ;;
-esac
+require_name_free "$NAMESPACE" "$DOMAIN" ros_nodes_container "$DOMAIN" "$IMAGE" "$USER_ID"
 
 # --------------------------------------------------------------------------- cleaning up
 # On every way out: stop the container if it still runs (once docker run has ended, it would run

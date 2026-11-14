@@ -1,6 +1,6 @@
 #!/bin/bash
 # Entry point of the container (container/Dockerfile): starts the executor and the gateway with
-# run.sh --prefix /opt/bt_server, which reads the settings in /opt/bt_server/config (mounted by
+# /opt/bt_server/run.sh --prefix /opt/bt_server, which reads the settings in /opt/bt_server/config (mounted by
 # jetson_run.sh or the service) and takes the options given after the image name, such as
 # --namespace NS and --domain N.
 #
@@ -25,4 +25,7 @@ fi
 if [ -d /opt/bt_server/config/leaves ]; then
     export PYTHONPATH="/opt/bt_server/config/leaves${PYTHONPATH:+:$PYTHONPATH}"
 fi
-exec /opt/bt_server/bin/run.sh --prefix /opt/bt_server "$@"
+# --no-checks: jetson_run.sh and jetson_setup_system_service.sh look for the executor's name on
+# the ROS network, and for the service, before they start the container; from inside it run.sh
+# could not see this machine's services and address.
+exec /opt/bt_server/run.sh --prefix /opt/bt_server --no-checks "$@"

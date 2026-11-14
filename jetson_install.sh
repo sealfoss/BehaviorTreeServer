@@ -27,8 +27,8 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROG="jetson_install.sh"
-# shellcheck source=container/common.sh
-source "$REPO/container/common.sh"
+# shellcheck source=lib/common.sh
+source "$REPO/lib/common.sh"
 
 IMAGE="$DEFAULT_IMAGE"
 TEST_IMAGE="$DEFAULT_TEST_IMAGE"
@@ -41,7 +41,6 @@ RUN_TESTS=0
 RECONFIGURE=0
 CONFIG_DIR="$REPO/config"
 DATA_DIR="$REPO/.data"
-PACKAGES=(bt_server_interfaces bt_server_core bt_server_executor bt_server_gateway bt_server_bringup)
 
 usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -55,7 +54,7 @@ while [ $# -gt 0 ]; do
         --test) RUN_TESTS=1; shift ;;
         --reconfigure) RECONFIGURE=1; shift ;;
         -h|--help) usage; exit 0 ;;
-        *) echo "$PROG: unknown option $1" >&2; usage >&2; exit 2 ;;
+        *) unknown_option "$1" ;;
     esac
 done
 
@@ -74,13 +73,11 @@ for package in "${PACKAGES[@]}"; do
     [ -f "$REPO/$package/package.xml" ] || die "$REPO/$package/package.xml missing: run this script from the repository"
 done
 [ -f "$REPO/container/Dockerfile" ] || die "$REPO/container/Dockerfile missing"
-valid_port "$PORT" || die "--port must be a port number, not '$PORT'"
+check_port "$PORT"
 if [ "$PORT" -lt "$(unprivileged_port_start)" ]; then
     die "--port $PORT: jetson_run.sh's container runs as you, without the right to use ports below $(unprivileged_port_start); the service (./jetson_setup_system_service.sh) serves port 80"
 fi
-if [ -n "$NAMESPACE" ]; then
-    valid_namespace "$NAMESPACE" || die "the namespace must be a ROS name part (letters, digits, single _), not '$NAMESPACE'"
-fi
+if [ -n "$NAMESPACE" ]; then check_namespace "$NAMESPACE"; fi
 setup_sudo
 
 # --------------------------------------------------------------------------- host packages
@@ -172,61 +169,9 @@ print(\"  ROS 2 \" + \"$ROS_DISTRO_NAME\" + \", Python \" + platform.python_vers
 '" || die "the image does not work on this machine"
 
 # --------------------------------------------------------------------------- settings for jetson_run.sh
-# Written by the user who runs this script (also when it runs under sudo), because jetson_run.sh
+# Written as the user who runs this script (also when it runs under sudo), because jetson_run.sh
 # runs the container as that user.
-OWNER="$(id -u):$(id -g)"
-if [ "$(id -u)" = 0 ] && [ -n "${SUDO_UID:-}" ]; then OWNER="$SUDO_UID:${SUDO_GID:-$SUDO_UID}"; fi
-NAMESPACE_GIVEN=1
-if [ -z "$NAMESPACE" ]; then
-    NAMESPACE_GIVEN=0
-    NAMESPACE="$(cat "$CONFIG_DIR/namespace" 2>/dev/null || default_namespace)"
-fi
-ADDRESS="$(lan_address)"
-[ -n "$ADDRESS" ] || ADDRESS="127.0.0.1"
-mkdir -p "$CONFIG_DIR" "$DATA_DIR/trees" "$DATA_DIR/log"
-if [ ! -f "$CONFIG_DIR/gateway.toml" ] || [ "$RECONFIGURE" = 1 ]; then
-    say "Writing $CONFIG_DIR/gateway.toml"
-    cat > "$CONFIG_DIR/gateway.toml" <<EOF
-# Settings of the gateway (design 9.1), written by jetson_install.sh for $(short_hostname).
-link = "ros"
-http_host = "$ADDRESS"
-http_port = $PORT
-public_names = ["bt.{hostname}.local", "bt-{hostname}.local", "{hostname}.local"]
-executors = ["/$NAMESPACE/bt_executor"]
-allowed_networks = []
-trees_dir = "$DATA_DIR/trees"
-EOF
-fi
-if [ ! -f "$CONFIG_DIR/executor.yaml" ] || [ "$RECONFIGURE" = 1 ]; then
-    say "Writing $CONFIG_DIR/executor.yaml"
-    cat > "$CONFIG_DIR/executor.yaml" <<EOF
-# Parameters of the executor (design 8.1), written by jetson_install.sh for $(short_hostname).
-/**:
-  ros__parameters:
-    leaf_modules: ["bt_server_core.demo_leaves"]
-    log_dir: "$DATA_DIR/log"
-    journal_file: "$DATA_DIR/goals.jsonl"
-EOF
-fi
-if [ ! -f "$CONFIG_DIR/namespace" ] || [ "$NAMESPACE_GIVEN" = 1 ] || [ "$RECONFIGURE" = 1 ]; then
-    echo "$NAMESPACE" > "$CONFIG_DIR/namespace"
-fi
-# A kept gateway.toml may not say what was asked for now.
-if [ "$NAMESPACE_GIVEN" = 1 ] && ! grep -Fq "\"/$NAMESPACE/bt_executor\"" "$CONFIG_DIR/gateway.toml"; then
-    warn "$CONFIG_DIR/gateway.toml is kept and does not list /$NAMESPACE/bt_executor among its executors: add --reconfigure to rewrite it"
-fi
-if [ "$PORT_GIVEN" = 1 ] && [ "$(sed -n 's/^http_port *= *\([0-9]*\).*/\1/p' "$CONFIG_DIR/gateway.toml")" != "$PORT" ]; then
-    warn "$CONFIG_DIR/gateway.toml is kept and has another http_port than $PORT: add --reconfigure to rewrite it"
-fi
-if address_is_dynamic "$ADDRESS"; then
-    warn "$ADDRESS came from DHCP: give this machine a DHCP reservation, or run ./jetson_install.sh --reconfigure when the address changes"
-fi
-if [ -d "$REPO/examples/trees" ] && [ -z "$(ls -A "$DATA_DIR/trees" 2>/dev/null)" ]; then
-    cp -r "$REPO/examples/trees/." "$DATA_DIR/trees/"
-fi
-if [ "$(id -u)" = 0 ] && [ "$OWNER" != "0:0" ]; then
-    chown -R "$OWNER" "$CONFIG_DIR" "$DATA_DIR"
-fi
+write_checkout_settings "$CONFIG_DIR" "$DATA_DIR" "$NAMESPACE" "$PORT" "$PORT_GIVEN" "$RECONFIGURE"
 
 # --------------------------------------------------------------------------- test suite
 if [ "$RUN_TESTS" = 1 ]; then

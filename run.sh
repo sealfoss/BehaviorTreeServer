@@ -3,34 +3,44 @@
 # executor /<namespace>/bt_executor and the gateway, in the foreground. Ctrl+C stops both; the
 # executor first stops a running tree as Stop does and waits for its cancels (design 8.2).
 #
-#   ./run.sh [--prefix DIR] [--domain N] [--namespace NS]
+#   ./run.sh [--prefix DIR] [--domain N] [--namespace NS] [--no-checks]
 #
 #   --prefix DIR     the install to run (default: this checkout)
 #   --domain N       ROS_DOMAIN_ID (default: $ROS_DOMAIN_ID, or 0)
-#   --namespace NS   executor namespace (default: the one install.sh configured, or cell1)
+#   --namespace NS   executor namespace (default: the one install.sh configured)
+#   --no-checks      start without the checks below (the container's entry point: jetson_run.sh
+#                    and the service check before they start it)
 #
-# The settings are <prefix>/config/gateway.toml and <prefix>/config/executor.yaml.
+# The settings are <prefix>/config/gateway.toml and <prefix>/config/executor.yaml. It refuses to
+# start, with a message saying what to do, when an executor of the same name is on the ROS network
+# of the domain already (another machine, or a service of this one: two would both accept the same
+# goals; it looks for about 5 s first), when a service of this machine runs that name in that
+# domain, or when the gateway's address is no longer this machine's or its port needs root.
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PREFIX="$REPO"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROG="run.sh"
+# shellcheck source=lib/common.sh
+source "$HERE/lib/common.sh"
+
+PREFIX="$HERE"
 DOMAIN="${ROS_DOMAIN_ID:-0}"
 NAMESPACE=""
-ROS_SETUP="/opt/ros/lyrical/setup.bash"
+CHECKS=1
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --prefix) PREFIX="$(realpath -m "$2")"; shift 2 ;;
-        --domain) DOMAIN="$2"; shift 2 ;;
-        --namespace) NAMESPACE="$2"; shift 2 ;;
-        -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "run.sh: unknown option $1" >&2; exit 2 ;;
+        --prefix) need_value "$1" $#; PREFIX="$(realpath -m "$2")"; shift 2 ;;
+        --domain) need_value "$1" $#; DOMAIN="$2"; shift 2 ;;
+        --namespace) need_value "$1" $#; NAMESPACE="$2"; shift 2 ;;
+        --no-checks) CHECKS=0; shift ;;
+        -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) unknown_option "$1" ;;
     esac
 done
 
 if [ -x "$PREFIX/.venv/bin/python" ]; then VENV="$PREFIX/.venv"; else VENV="$PREFIX/venv"; fi
 CONFIG_DIR="$PREFIX/config"
-die() { printf 'run.sh: %s\n' "$*" >&2; exit 1; }
 
 [ -r "$ROS_SETUP" ] || die "ROS 2 Lyrical is not installed ($ROS_SETUP): run ./install.sh"
 [ -r "$PREFIX/install/setup.bash" ] || die "nothing built in $PREFIX/install: run ./install.sh"
@@ -38,13 +48,21 @@ die() { printf 'run.sh: %s\n' "$*" >&2; exit 1; }
 [ -r "$CONFIG_DIR/gateway.toml" ] || die "$CONFIG_DIR/gateway.toml missing: run ./install.sh"
 [ -r "$CONFIG_DIR/executor.yaml" ] || die "$CONFIG_DIR/executor.yaml missing: run ./install.sh"
 if [ -z "$NAMESPACE" ]; then
-    NAMESPACE="$(cat "$CONFIG_DIR/namespace" 2>/dev/null || echo cell1)"
+    NAMESPACE="$(head -1 "$CONFIG_DIR/namespace" 2>/dev/null || true)"
+    [ -n "$NAMESPACE" ] || NAMESPACE="$(default_namespace)"
 fi
+check_namespace "$NAMESPACE"
+check_domain "$DOMAIN"
+HOST="$(gateway_value "$CONFIG_DIR/gateway.toml" http_host)"
+PORT="$(gateway_value "$CONFIG_DIR/gateway.toml" http_port)"
 
-# The systemd services use domain 0 and the same executor name: two executors of one name in
-# one domain would answer the same goals.
-if [ "$DOMAIN" = 0 ] && systemctl is-active --quiet bt-executor.service 2>/dev/null; then
-    die "the bt-executor service is running in ROS domain 0; stop it (sudo systemctl stop bt-server.target) or use --domain N"
+if [ "$CHECKS" = 1 ]; then
+    check_run_settings "$CONFIG_DIR" install.sh
+    if [ "$(id -u)" != 0 ] && [ "${PORT:-80}" -lt "$(unprivileged_port_start)" ]; then
+        die "port ${PORT:-80} (http_port in $CONFIG_DIR/gateway.toml) needs root: use a port from $(unprivileged_port_start) (./install.sh --port 8080 --reconfigure), or the services, ./setup_system_service.sh"
+    fi
+    refuse_running_service "$NAMESPACE" "$DOMAIN"
+    require_name_free "$NAMESPACE" "$DOMAIN" ros_nodes_native "$DOMAIN"
 fi
 
 set +u
@@ -75,9 +93,7 @@ pids+=("$!")
 setsid python -m bt_server_gateway --config "$CONFIG_DIR/gateway.toml" &
 pids+=("$!")
 
-host="$(sed -n 's/^http_host *= *"\([^"]*\)".*/\1/p' "$CONFIG_DIR/gateway.toml")"
-port="$(sed -n 's/^http_port *= *\([0-9]*\).*/\1/p' "$CONFIG_DIR/gateway.toml")"
-echo "run.sh: executor /$NAMESPACE/bt_executor (ROS domain $DOMAIN) and gateway on http://$host:$port/ ; Ctrl+C stops both"
+echo "run.sh: executor /$NAMESPACE/bt_executor (ROS domain $DOMAIN) and gateway on http://$HOST:$PORT/ ; Ctrl+C stops both"
 
 # When one process ends by itself, stop the other.
 status=0
