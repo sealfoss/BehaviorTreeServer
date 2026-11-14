@@ -34,7 +34,12 @@ def test_P_01_new_tree_add_connect_execute(start_gateway, open_tab):
 
     tab.tid("btn-execute").click()
     wait_until(lambda: "succeeded" in tab.run_state(), timeout=15, message=f"run state {tab.run_state()!r}")
-    statuses = {node_id: tab.status(node_id) for node_id in (root_id, sequence, first, second)}
+    # The nodes' final statuses come in a status message of their own, which a slower machine (a
+    # Jetson) draws a moment after the run's end.
+    nodes = (root_id, sequence, first, second)
+    wait_until(lambda: all(tab.status(node_id) == "succeeded" for node_id in nodes), timeout=10,
+               message=f"statuses {[tab.status(node_id) for node_id in nodes]!r}")
+    statuses = {node_id: tab.status(node_id) for node_id in nodes}
     assert statuses == dict.fromkeys(statuses, "succeeded"), statuses
     for node_id in statuses:
         assert tab.tid(f"status-{node_id}").text_content() == "Succeeded"

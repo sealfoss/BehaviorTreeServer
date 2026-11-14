@@ -44,3 +44,26 @@ Nothing is installed into the system Python with pip.
 | `/etc/systemd/system/bt-executor.service`, `bt-gateway.service`, `bt-server-name.service`, `bt-server.target` | `setup_system_service.sh` | The units, enabled for boot. Tree logs go to `/var/log/bt_server`. |
 | rosdep's sources list (`/etc/ros/rosdep/sources.list.d/20-default.list`) | `install.sh` | `rosdep init`, so the package.xml dependencies can be resolved. |
 | Chrome Headless Shell in `~/.cache/ms-playwright` | `install.sh` | Browser for the page tests. |
+
+## orion: a Jetson, in a container
+
+`orion` (Jetson Orin, JetPack 6.2 = L4T R36.5.0, Ubuntu 22.04.5, aarch64) runs the server in an
+Ubuntu 26.04 container ([JETSON.md](JETSON.md)). The image holds the software listed above, put
+there by `install.sh` during the image build; the host got nothing of ROS.
+
+**Host packages:** none were installed. `jetson_install.sh` checks for `docker` (JetPack's
+`docker-ce` 29.6 was there), `avahi-daemon`, `avahi-utils`, `iproute2` and `curl`, which were all
+present, and that `docker.service` and `avahi-daemon.service` are enabled and running.
+
+**In the image only** (`container/Dockerfile`): the packages of the tables above; for the test
+image also `iproute2` and the libraries Playwright's Chromium needs (`playwright install-deps`),
+with Chromium in `/opt/ms-playwright`.
+
+| Item | By | What |
+|---|---|---|
+| Images `bt-server:latest`, `bt-server-test:latest`, and Docker's build cache | `jetson_install.sh` (`--test` for the second) | The server; the test suite. |
+| `~/BehaviorTreeServer/config/`, `.data/` | `jetson_install.sh` | Settings for `jetson_run.sh` (gateway on 192.168.68.86:8080, executor `/orion/bt_executor`), `config/apt-packages` (empty), and its trees, logs and goal journal. |
+| System user `btserver` (uid 999), home `/var/lib/bt_server` | `jetson_setup_system_service.sh` | The container's processes run as it: trees, goal journal, the gateway's state. |
+| `/etc/bt_server/gateway.toml`, `executor.yaml`, `namespace` | `jetson_setup_system_service.sh` | The service's settings (gateway on 192.168.68.86:80, executor `/orion/bt_executor`, ROS domain 0). |
+| `/opt/bt_server/bin/bt-publish-name` | `jetson_setup_system_service.sh` | The name publisher, on the host. |
+| `/etc/systemd/system/bt-server-container.service`, `bt-server-name.service`, `bt-server.target` | `jetson_setup_system_service.sh` | The units, enabled for boot and for Docker's start. Tree logs go to `/var/log/bt_server`. |

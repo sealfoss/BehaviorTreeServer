@@ -70,6 +70,24 @@ async def test_G_19_a_tree_is_the_tree_of_one_session(start_gateway, tmp_path) -
     assert reply["t"] == "no" and "local" in reply["reason"]
 
 
+async def test_configured_executor_comes_first_also_when_discovery_reports_sooner(start_gateway, tmp_path) -> None:
+    """A page that has not chosen an executor attaches to the first in the list: that is the
+    configured one, also when discovery reports another server's executor (the same ROS domain)
+    before start() makes the configured one's session, as RosLinkFactory can."""
+
+    class EagerFactory(FakeFactory):
+        async def start(self, on_executors) -> None:  # noqa: ANN001
+            on_executors(sorted(self.links))  # "/a_other/..." sorts first ...
+            await asyncio.sleep(0)  # ... and its session is made before start() goes on
+
+    own, other = FakeLink("/orion/bt_executor"), FakeLink("/a_other/bt_executor")
+    gw = await start_gateway(make_settings(tmp_path / "trees", link="ros", executors=["/orion/bt_executor"]),
+                             EagerFactory(own, other))
+    assert list(gw.gateway.sessions) == ["/a_other/bt_executor", "/orion/bt_executor"]  # the race, as made
+    # the welcome's list, which the page takes its default from
+    assert [item["name"] for item in gw.gateway.executor_list()] == ["/orion/bt_executor", "/a_other/bt_executor"]
+
+
 async def test_G_22_executor_down_tree_still_edited_and_saved(start_gateway, tmp_path) -> None:
     trees = tmp_path / "trees"
     state = trees / ".gateway" / "catalogs"
@@ -249,7 +267,9 @@ async def test_K_11_interrupted_write_leaves_the_old_file_whole(gw: Harness, mon
     monkeypatch.setattr(files_module.os, "replace", real_replace)
     await browser.request("op", doc="@blackboard", rev=0, op={"op": "bb.set_value", "id": entry, "value": 4})
     await gw.until(lambda: board_file(gw)["v"]["value"] == 4)
-    assert not session._board_failed
+    # The file is in place when the write's thread ends; its result reaches the session a moment
+    # later, on the event loop (which a slower machine, a Jetson, shows).
+    await gw.until(lambda: not session._board_failed)
 
 
 async def test_reset_after_the_run_restores_the_blackboard(gw: Harness) -> None:

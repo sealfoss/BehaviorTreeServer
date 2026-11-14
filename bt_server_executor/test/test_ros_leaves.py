@@ -321,7 +321,10 @@ def test_call_action_timeout_cancel_answered_unknown_goal(h):
 
     The server is killed only once it has accepted the goal (killed before its reply, the leaf
     is halted before the goal reply and rightly waits 5 s for it, design 6.5 and 16), and the
-    Timeout passes only after the restarted server is on the network."""
+    Timeout passes only after the restarted server is on the network. The restarted server comes
+    up before the first one is killed, so that the action is on the network all along: started
+    after the kill, it can take longer to come up than the leaf's check once a second (on a slower
+    machine, a Jetson), which then rightly gives up with "server lost" first."""
     timeout = 6.0
     procs = [subprocess.Popen([sys.executable, "-c", SERVER_SCRIPT, f"{h.ns}/restart"])]
     try:
@@ -332,8 +335,6 @@ def test_call_action_timeout_cancel_answered_unknown_goal(h):
         action_leaf = run.runner.node(1).leaf
         accepted = lambda: action_leaf._goal is not None and action_leaf._goal.handle is not None  # noqa: E731
         assert h.spin_until(accepted, 5.0), "the server did not accept the goal"
-        procs[0].send_signal(signal.SIGKILL)
-        procs[0].wait(timeout=10)
         procs.append(subprocess.Popen([sys.executable, "-c", SERVER_SCRIPT, f"{h.ns}/restart", "restarted_server"]))
         cancel_service = f"{h.ns}/restart/_action/cancel_goal"
 
@@ -344,7 +345,9 @@ def test_call_action_timeout_cancel_answered_unknown_goal(h):
                 return False
             return any(name == cancel_service for name, _ in services)
 
-        assert h.spin_until(restarted, timeout - 1.0), "the restarted server did not come up in time"
+        assert h.spin_until(restarted, timeout - 1.5), "the restarted server did not come up in time"
+        procs[0].send_signal(signal.SIGKILL)
+        procs[0].wait(timeout=10)
         assert h.now() < timeout - 0.5
         result = h.finish(run, 20.0)
         cancelling = run.sink.status_times(1, "C")[0]

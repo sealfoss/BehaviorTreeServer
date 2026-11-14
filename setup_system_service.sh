@@ -48,7 +48,7 @@ while [ $# -gt 0 ]; do
         --reconfigure) RECONFIGURE=1; shift ;;
         --skip-build) SKIP_BUILD=1; shift ;;
         --no-start) START=0; shift ;;
-        -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "setup_system_service.sh: unknown option $1" >&2; exit 2 ;;
     esac
 done

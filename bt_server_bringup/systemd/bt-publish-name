@@ -24,7 +24,7 @@ for name in "$@"; do
     /usr/bin/avahi-publish -a -R "$name" "$address" &
     pids+=("$!")
 done
-trap 'kill "${pids[@]}" 2>/dev/null; exit 0' TERM INT
+trap 'kill "${pids[@]}" 2>/dev/null; exit 0' TERM INT HUP
 wait -n
 kill "${pids[@]}" 2>/dev/null
 exit 1

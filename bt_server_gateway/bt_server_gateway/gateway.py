@@ -177,9 +177,14 @@ class Gateway:
         return session
 
     def executor_list(self) -> list[dict]:
-        return [{"name": name, "online": session.online,
-                 "state": session.status.state if session.status is not None else 0}
-                for name, session in self.sessions.items()]
+        """The executors, the configured ones first and in their order. A page that has not chosen
+        an executor attaches to the first one, which must be this server's own and not one that ROS
+        discovery happened to report sooner at start (another server's, in the same domain)."""
+        names = [name for name in self.settings.executors if name in self.sessions]
+        names += [name for name in self.sessions if name not in names]
+        return [{"name": name, "online": self.sessions[name].online,
+                 "state": self.sessions[name].status.state if self.sessions[name].status is not None else 0}
+                for name in names]
 
     def welcome(self, client: Client) -> dict:
         return {"t": "welcome", "protocol": PROTOCOL, "client": client.id, "executors": self.executor_list(),

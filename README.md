@@ -9,6 +9,7 @@ work on other machines through ROS 2 (Lyrical).
   [docs/CONTRACT.md](docs/CONTRACT.md)
 * Platform facts checked on the server: [docs/VERIFIED.md](docs/VERIFIED.md)
 * Software installed on the server, and why: [docs/INSTALLED.md](docs/INSTALLED.md)
+* On a Jetson (JetPack 6, Ubuntu 22.04), in a container: [docs/JETSON.md](docs/JETSON.md)
 
 ## Parts
 
@@ -23,6 +24,7 @@ work on other machines through ROS 2 (Lyrical).
 | `examples/trees/` | Example trees (`hello`, `demo`, `patrol`) copied into a new installation's trees folder. |
 | `tests/page/` | Browser tests of the page (Playwright) against a real gateway. |
 | `tools/` | `smoke_test.py` (drives a running server like a browser), `make_example_trees.py`. |
+| `container/` | The Ubuntu 26.04 image for hosts that cannot run Lyrical, such as a Jetson: `Dockerfile`, entry point, unit templates (docs/JETSON.md). |
 
 ## Install, run, and run as a service
 
@@ -46,6 +48,16 @@ systemctl status bt-server.target              # all three units
 journalctl -u bt-gateway -u bt-executor -f     # their logs
 sudo systemctl restart bt-server.target
 python3 tools/smoke_test.py http://<LAN address>/ --tree demo   # a run through the WebSocket
+```
+
+On a Jetson with JetPack 6 (Ubuntu 22.04), where Lyrical does not install, the server runs in an
+Ubuntu 26.04 container ([docs/JETSON.md](docs/JETSON.md)):
+
+```bash
+./jetson_install.sh                    # Docker and Avahi's tools if missing, the image bt-server:latest, config/
+./jetson_run.sh                        # executor /<hostname>/bt_executor and the gateway on http://<LAN address>:8080/
+./jetson_setup_system_service.sh       # user btserver, /etc/bt_server/*, and the units bt-server-container,
+                                       # bt-server-name (+ bt-server.target), enabled and started
 ```
 
 Without ROS (for example on Windows), the gateway runs trees in-process: a settings file with

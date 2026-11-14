@@ -18,6 +18,7 @@
 #   --skip-apt        do not install system packages (fail if something is missing)
 #   --skip-tests      do not install the test tools (pytest, py_trees, Playwright)
 #   --reconfigure     rewrite config/gateway.toml and config/executor.yaml even if they exist
+#   --deps-only       stop after the system packages and the Python environment (no build)
 #   -h, --help        this text
 #
 # What it installs is listed in docs/INSTALLED.md. It is safe to run again: it skips what is
@@ -32,6 +33,7 @@ PORT=8080
 SKIP_APT=0
 SKIP_TESTS=0
 RECONFIGURE=0
+DEPS_ONLY=0
 ROS_DISTRO_NAME="lyrical"
 ROS_SETUP="/opt/ros/${ROS_DISTRO_NAME}/setup.bash"
 PACKAGES=(bt_server_interfaces bt_server_core bt_server_executor bt_server_gateway bt_server_bringup)
@@ -47,6 +49,7 @@ while [ $# -gt 0 ]; do
         --skip-apt) SKIP_APT=1; shift ;;
         --skip-tests) SKIP_TESTS=1; shift ;;
         --reconfigure) RECONFIGURE=1; shift ;;
+        --deps-only) DEPS_ONLY=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "install.sh: unknown option $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -190,6 +193,12 @@ if [ "$SKIP_TESTS" = 0 ]; then
     "$VENV/bin/python" -m pip install --quiet pytest pytest-asyncio pytest-aiohttp py_trees playwright pytest-playwright
     "$VENV/bin/python" -m playwright install chromium >/dev/null \
         || echo "install.sh: warning: Playwright's Chromium could not be installed; the page tests will be skipped" >&2
+fi
+if [ "$DEPS_ONLY" = 1 ]; then
+    # (container/Dockerfile installs the dependencies in a layer of their own, which a change
+    # to the code does not invalidate)
+    say "Done (dependencies only, --deps-only)"
+    exit 0
 fi
 
 # --------------------------------------------------------------------------- build

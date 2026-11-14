@@ -1,0 +1,17 @@
+# Not sent to docker build (container/Dockerfile): version control, this machine's own
+# environment, build, settings and data, and caches. The names without a slash match only at
+# the top of the repository.
+.git
+.venv
+venv
+build
+install
+log
+config
+.data
+web/node_modules
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache

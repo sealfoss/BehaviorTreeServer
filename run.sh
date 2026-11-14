@@ -23,7 +23,7 @@ while [ $# -gt 0 ]; do
         --prefix) PREFIX="$(realpath -m "$2")"; shift 2 ;;
         --domain) DOMAIN="$2"; shift 2 ;;
         --namespace) NAMESPACE="$2"; shift 2 ;;
-        -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "run.sh: unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -75,8 +75,8 @@ pids+=("$!")
 setsid python -m bt_server_gateway --config "$CONFIG_DIR/gateway.toml" &
 pids+=("$!")
 
-host="$(sed -n 's/^http_host *= *"\(.*\)"/\1/p' "$CONFIG_DIR/gateway.toml")"
-port="$(sed -n 's/^http_port *= *\([0-9]*\)/\1/p' "$CONFIG_DIR/gateway.toml")"
+host="$(sed -n 's/^http_host *= *"\([^"]*\)".*/\1/p' "$CONFIG_DIR/gateway.toml")"
+port="$(sed -n 's/^http_port *= *\([0-9]*\).*/\1/p' "$CONFIG_DIR/gateway.toml")"
 echo "run.sh: executor /$NAMESPACE/bt_executor (ROS domain $DOMAIN) and gateway on http://$host:$port/ ; Ctrl+C stops both"
 
 # When one process ends by itself, stop the other.

@@ -1,0 +1,45 @@
+# Behavior Tree Server: the executor /@NAMESPACE@/bt_executor and the gateway, in the container
+# @IMAGE@ (Ubuntu 26.04, ROS 2 Lyrical), for a host that cannot run Lyrical itself. Written by
+# jetson_setup_system_service.sh from container/bt-server-container.service.in.
+# Its output is in the journal: journalctl -u bt-server-container
+# ROS discovery and middleware settings (ROS_STATIC_PEERS, FASTDDS_DEFAULT_PROFILES_FILE, ...) go
+# into a drop-in, which a new setup keeps: sudo systemctl edit bt-server-container. Files they name
+# belong in /etc/bt_server/, which the container sees at the same path.
+[Unit]
+Description=Behavior Tree Server: executor /@NAMESPACE@/bt_executor and gateway (container @IMAGE@)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+PartOf=bt-server.target
+
+[Service]
+Type=exec
+Environment=ROS_DOMAIN_ID=@DOMAIN@
+Environment=BT_NAMESPACE=@NAMESPACE@
+Environment=BT_IMAGE=@IMAGE@
+ExecStartPre=-@DOCKER@ rm --force @CONTAINER@
+# The container starts as root with four capabilities only: CAP_SETUID and CAP_SETGID, with which
+# container/entrypoint.sh becomes btserver (@UID@:@GID@) at once; CAP_NET_BIND_SERVICE, which
+# btserver keeps for the gateway's port; and CAP_KILL, without which docker-init (root, process 1)
+# may not pass docker stop's SIGTERM on to btserver's run.sh, and the container would end without
+# the executor stopping the tree. Stopping goes through ExecStop alone (--sig-proxy=false), so
+# that the container gets a single SIGTERM.
+ExecStart=@DOCKER@ run --rm --name @CONTAINER@ --init --runtime runc --network host --ipc host \
+    --security-opt no-new-privileges --sig-proxy=false \
+    --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add NET_BIND_SERVICE --cap-add KILL \
+    --stop-timeout 30 --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
+    -e ROS_DOMAIN_ID -e BT_USER=@UID@:@GID@ -e HOME=@STATE_DIR@ @TIMEZONE@ \
+    @ROS_ENV@ \
+    -v @CONF@:/opt/bt_server/config:ro -v @CONF@:@CONF@:ro -v @STATE_DIR@:@STATE_DIR@ -v @LOG_DIR@:@LOG_DIR@ \
+    @IMAGE@ --namespace @NAMESPACE@ --domain @DOMAIN@
+# ("-": when the container ended by itself, it is gone already)
+ExecStop=-@DOCKER@ stop -t 30 @CONTAINER@
+TimeoutStartSec=60
+TimeoutStopSec=45
+Restart=always
+RestartSec=5
+
+[Install]
+# docker.service too: when Docker is stopped, this unit stops with it (Requires=), and nothing else
+# would start it again when Docker starts (bt-server.target stays active meanwhile).
+WantedBy=multi-user.target bt-server.target docker.service

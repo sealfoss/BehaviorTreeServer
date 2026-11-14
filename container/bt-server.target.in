@@ -1,0 +1,12 @@
+# The Behavior Tree Server as one unit: the container (the executor and the gateway) and the
+# published names. Written by jetson_setup_system_service.sh from container/bt-server.target.in.
+#   systemctl status bt-server.target      systemctl restart bt-server.target
+# When Docker starts again after a stop, bt-server-container.service is started by docker.service
+# (its WantedBy=). To keep the server off, disable it:
+#   sudo systemctl disable --now bt-server.target bt-server-container.service bt-server-name.service
+[Unit]
+Description=Behavior Tree Server (container @IMAGE@, bt.%l.local)
+Wants=bt-server-container.service bt-server-name.service
+
+[Install]
+WantedBy=multi-user.target
