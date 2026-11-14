@@ -1,0 +1,4 @@
+# LF in the repository and in every checkout, Windows included: the scripts and unit templates
+# run on Linux.
+* text=auto eol=lf
+*.png binary
